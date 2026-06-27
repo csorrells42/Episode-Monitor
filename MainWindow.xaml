@@ -31,13 +31,91 @@
             <Setter Property="MinHeight" Value="34" />
         </Style>
 
-        <Style TargetType="ToggleButton" BasedOn="{StaticResource {x:Type Button}}" />
+        <Style TargetType="ToggleButton">
+            <Setter Property="Background" Value="#142130" />
+            <Setter Property="Foreground" Value="#f5f8fb" />
+            <Setter Property="BorderBrush" Value="#37506a" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="14,8" />
+            <Setter Property="MinHeight" Value="34" />
+        </Style>
 
         <Style TargetType="ComboBox">
             <Setter Property="Background" Value="#0f1720" />
             <Setter Property="Foreground" Value="#f5f8fb" />
             <Setter Property="BorderBrush" Value="#37506a" />
             <Setter Property="MinHeight" Value="34" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton x:Name="ToggleButton"
+                                          Background="{TemplateBinding Background}"
+                                          BorderBrush="{TemplateBinding BorderBrush}"
+                                          BorderThickness="1"
+                                          Focusable="False"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                          ClickMode="Press">
+                                <Grid>
+                                    <ContentPresenter Margin="9,0,32,0"
+                                                      VerticalAlignment="Center"
+                                                      HorizontalAlignment="Left"
+                                                      Content="{TemplateBinding SelectionBoxItem}"
+                                                      ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                                      ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
+                                                      RecognizesAccessKey="True"
+                                                      TextElement.Foreground="{TemplateBinding Foreground}" />
+                                    <Path HorizontalAlignment="Right"
+                                          VerticalAlignment="Center"
+                                          Margin="0,0,10,0"
+                                          Fill="#f5f8fb"
+                                          Data="M 0 0 L 4 4 L 8 0 Z" />
+                                </Grid>
+                            </ToggleButton>
+                            <Popup x:Name="PART_Popup"
+                                   AllowsTransparency="True"
+                                   Focusable="False"
+                                   IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   Placement="Bottom"
+                                   PopupAnimation="Fade">
+                                <Border Background="#0f1720"
+                                        BorderBrush="#d7e7f3"
+                                        BorderThickness="1"
+                                        MinWidth="{TemplateBinding ActualWidth}">
+                                    <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                                        <ItemsPresenter />
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ToggleButton" Property="BorderBrush" Value="#6b92b6" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.55" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Background" Value="#0f1720" />
+            <Setter Property="Foreground" Value="#f5f8fb" />
+            <Setter Property="Padding" Value="8,6" />
+            <Style.Triggers>
+                <Trigger Property="IsHighlighted" Value="True">
+                    <Setter Property="Background" Value="#243f58" />
+                    <Setter Property="Foreground" Value="#ffffff" />
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#1d3348" />
+                    <Setter Property="Foreground" Value="#ffffff" />
+                </Trigger>
+            </Style.Triggers>
         </Style>
 
         <Style TargetType="CheckBox">
@@ -108,23 +186,69 @@
             </Grid.RowDefinitions>
 
             <Border Grid.Column="0" Grid.Row="0" Background="#05080c" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1">
-                <Grid>
+                <Grid x:Name="PreviewHost" SizeChanged="PreviewHostSizeChanged">
                     <Image x:Name="PreviewImage" Stretch="Uniform" Visibility="Collapsed" />
+                    <Canvas x:Name="FaceCueGuideCanvas" IsHitTestVisible="False" />
                     <StackPanel x:Name="PreviewPlaceholder" VerticalAlignment="Center" HorizontalAlignment="Center">
                         <TextBlock Text="Episode Monitor" FontSize="30" FontWeight="Bold" HorizontalAlignment="Center" />
                         <TextBlock x:Name="PreviewStateText" Text="Camera disabled" Margin="0,10,0,0" Foreground="#b9d7ef" HorizontalAlignment="Center" />
                     </StackPanel>
+                    <Border x:Name="TrackingOverlay" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="14" Background="#d8080d12" BorderBrush="#37506a" BorderThickness="1" Padding="10" MaxWidth="500">
+                        <StackPanel>
+                            <TextBlock x:Name="OverlayStateText" Text="Tracking idle" FontWeight="Bold" />
+                            <TextBlock x:Name="OverlayMetricText" Text="Motion -- | Threshold --" Foreground="#b9d7ef" Margin="0,4,0,0" />
+                            <TextBlock x:Name="OverlayTriggerText" Text="Enable episode watch to arm tracking." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,4,0,0" />
+                        </StackPanel>
+                    </Border>
                 </Grid>
             </Border>
 
             <Border Grid.Column="1" Grid.Row="0" Margin="14,0,0,0" Background="{StaticResource PanelBrush}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="14">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel>
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Margin="0,0,18,0">
                         <TextBlock Text="Episode Watch" FontSize="20" FontWeight="Bold" />
                         <TextBlock Text="Logs observable sustained low-motion events for review. This does not diagnose a medical condition." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,8" />
 
                         <CheckBox x:Name="WatchEnabledCheckBox" Content="Enable possible-sleep episode watch" Checked="WatchEnabledChanged" Unchecked="WatchEnabledChanged" />
                         <CheckBox x:Name="SnapshotCheckBox" Content="Save snapshots at episode start and end" IsChecked="True" />
+                        <CheckBox x:Name="EventVideoCheckBox" Content="Save webcam video for detected events" IsChecked="True" />
+                        <CheckBox x:Name="FaceCueCheckBox" Content="Track eye and jaw cues from webcam" IsChecked="True" Checked="FaceCueChanged" Unchecked="FaceCueChanged" />
+                        <WrapPanel Margin="0,8,0,0">
+                            <Button x:Name="CalibrateFaceCuesButton" Content="Calibrate Face Cues" Margin="0,0,8,8" Click="CalibrateFaceCuesClicked" />
+                            <Button Content="Mark Symptoms Now" Margin="0,0,8,8" Click="MarkSymptomsNowClicked" />
+                        </WrapPanel>
+                        <TextBlock x:Name="CalibrationGuardText" Text="Calibration available." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,0" />
+
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Face field horizontal" FontWeight="SemiBold" />
+                            <TextBlock x:Name="FaceFieldXValueText" Grid.Column="1" Text="50%" Foreground="#b9d7ef" />
+                        </Grid>
+                        <Slider x:Name="FaceFieldXSlider" Minimum="20" Maximum="80" Value="50" TickPlacement="BottomRight" Ticks="50" ValueChanged="SettingChanged" />
+
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Face field vertical" FontWeight="SemiBold" />
+                            <TextBlock x:Name="FaceFieldYValueText" Grid.Column="1" Text="48%" Foreground="#b9d7ef" />
+                        </Grid>
+                        <Slider x:Name="FaceFieldYSlider" Minimum="20" Maximum="80" Value="48" TickPlacement="BottomRight" Ticks="48" ValueChanged="SettingChanged" />
+
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Face field size" FontWeight="SemiBold" />
+                            <TextBlock x:Name="FaceFieldSizeValueText" Grid.Column="1" Text="60%" Foreground="#b9d7ef" />
+                        </Grid>
+                        <Slider x:Name="FaceFieldSizeSlider" Minimum="25" Maximum="90" Value="60" TickPlacement="BottomRight" Ticks="60" ValueChanged="SettingChanged" />
+                        <CheckBox x:Name="FaceAutoFollowCheckBox" Content="Auto-follow face field" IsChecked="True" Checked="FaceCueChanged" Unchecked="FaceCueChanged" />
 
                         <Grid Margin="0,18,0,0">
                             <Grid.ColumnDefinitions>
@@ -134,7 +258,7 @@
                             <TextBlock Text="Low-motion threshold" FontWeight="SemiBold" />
                             <TextBlock x:Name="ThresholdValueText" Grid.Column="1" Text="1.5%" Foreground="#b9d7ef" />
                         </Grid>
-                        <Slider x:Name="ThresholdSlider" Minimum="0.2" Maximum="8" Value="1.5" TickFrequency="0.1" ValueChanged="SettingChanged" />
+                        <Slider x:Name="ThresholdSlider" Minimum="0.2" Maximum="8" Value="1.5" TickPlacement="BottomRight" Ticks="1.5" ValueChanged="SettingChanged" />
 
                         <Grid Margin="0,18,0,0">
                             <Grid.ColumnDefinitions>
@@ -144,13 +268,54 @@
                             <TextBlock Text="Stillness time" FontWeight="SemiBold" />
                             <TextBlock x:Name="StillnessValueText" Grid.Column="1" Text="120s" Foreground="#b9d7ef" />
                         </Grid>
-                        <Slider x:Name="StillnessSlider" Minimum="15" Maximum="900" Value="120" TickFrequency="15" IsSnapToTickEnabled="True" ValueChanged="SettingChanged" />
+                        <Slider x:Name="StillnessSlider" Minimum="15" Maximum="900" Value="120" TickPlacement="BottomRight" Ticks="120" ValueChanged="SettingChanged" />
 
-                        <StackPanel Orientation="Horizontal" Margin="0,18,0,0">
-                            <Button Content="Mark Now" Click="MarkNowClicked" />
-                            <Button Content="Export CSV" Margin="8,0,0,0" Click="ExportClicked" />
-                            <Button Content="Clear" Margin="8,0,0,0" Click="ClearClicked" />
-                        </StackPanel>
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Eye cue sensitivity" FontWeight="SemiBold" />
+                            <TextBlock x:Name="EyeCueValueText" Grid.Column="1" Text="35%" Foreground="#b9d7ef" />
+                        </Grid>
+                        <Slider x:Name="EyeCueSlider" Minimum="15" Maximum="80" Value="35" TickPlacement="BottomRight" Ticks="35" ValueChanged="SettingChanged" />
+
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Jaw cue sensitivity" FontWeight="SemiBold" />
+                            <TextBlock x:Name="JawCueValueText" Grid.Column="1" Text="35%" Foreground="#b9d7ef" />
+                        </Grid>
+                        <Slider x:Name="JawCueSlider" Minimum="15" Maximum="120" Value="35" TickPlacement="BottomRight" Ticks="35" ValueChanged="SettingChanged" />
+
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Face cue time" FontWeight="SemiBold" />
+                            <TextBlock x:Name="FaceCueTimeValueText" Grid.Column="1" Text="3s" Foreground="#b9d7ef" />
+                        </Grid>
+                        <Slider x:Name="FaceCueTimeSlider" Minimum="1" Maximum="20" Value="3" TickPlacement="BottomRight" Ticks="3" ValueChanged="SettingChanged" />
+
+                        <Grid Margin="0,18,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Eye-led AI cue score" FontWeight="SemiBold" />
+                            <TextBlock x:Name="CompositeCueValueText" Grid.Column="1" Text="55%" Foreground="#b9d7ef" />
+                        </Grid>
+                        <Slider x:Name="CompositeCueSlider" Minimum="25" Maximum="90" Value="55" TickPlacement="BottomRight" Ticks="55" ValueChanged="SettingChanged" />
+
+                        <WrapPanel Margin="0,18,0,0">
+                            <Button Content="Mark Now" Margin="0,0,8,8" Click="MarkNowClicked" />
+                            <Button x:Name="ManualCaptureButton" Content="Start Capture" Margin="0,0,8,8" Click="ManualCaptureClicked" />
+                            <Button Content="Export CSV" Margin="0,0,8,8" Click="ExportClicked" />
+                            <Button Content="Clear" Margin="0,0,8,8" Click="ClearClicked" />
+                        </WrapPanel>
 
                         <TextBlock x:Name="MonitorStatusText" Text="Episode monitor idle." TextWrapping="Wrap" Margin="0,16,0,0" Foreground="#b9d7ef" />
 

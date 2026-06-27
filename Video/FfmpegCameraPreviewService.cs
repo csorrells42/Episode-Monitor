@@ -8,8 +8,11 @@ namespace EpisodeMonitor.Video;
 public sealed class FfmpegCameraPreviewService : IDisposable
 {
     private readonly string? _ffmpegPath = FfmpegLocator.FindFfmpeg();
+    private readonly object _errorLock = new();
+    private readonly List<string> _recentErrors = [];
     private Process? _process;
     private CancellationTokenSource? _cancellation;
+    private TaskCompletionSource<bool>? _firstFrameSignal;
 
     public event EventHandler<BitmapSource>? FrameAvailable;
     public event EventHandler<string>? StatusChanged;
@@ -22,9 +25,10 @@ public sealed class FfmpegCameraPreviewService : IDisposable
 
     public double DenoiseStrength { get; set; } = 2d;
 
-    public bool Start(string cameraName, CameraVideoMode? mode)
+    public async Task<bool> StartAsync(string cameraName, CameraVideoMode? mode, CancellationToken cancellationToken = default)
     {
         Stop();
+        ClearRecentErrors();
 
         if (_ffmpegPath is null)
         {
@@ -33,6 +37,7 @@ public sealed class FfmpegCameraPreviewService : IDisposable
         }
 
         _cancellation = new CancellationTokenSource();
+        _firstFrameSignal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         var startInfo = new ProcessStartInfo
         {
@@ -51,7 +56,7 @@ public sealed class FfmpegCameraPreviewService : IDisposable
         startInfo.ArgumentList.Add("-flags");
         startInfo.ArgumentList.Add("low_delay");
         startInfo.ArgumentList.Add("-rtbufsize");
-        startInfo.ArgumentList.Add("64M");
+        startInfo.ArgumentList.Add("16M");
         if (mode is { IsAuto: false })
         {
             if (!string.IsNullOrWhiteSpace(mode.InputFormat))
@@ -89,10 +94,13 @@ public sealed class FfmpegCameraPreviewService : IDisposable
 
         try
         {
+            LogCameraLine($"Starting FFmpeg preview for {cameraName} / {mode?.Label ?? "Auto"}");
+            LogCameraLine($"Arguments: {string.Join(" ", startInfo.ArgumentList)}");
             _process = Process.Start(startInfo);
         }
         catch (Exception ex)
         {
+            LogCameraLine($"Could not start camera preview: {ex}");
             StatusChanged?.Invoke(this, $"Could not start camera preview: {ex.Message}");
             return false;
         }
@@ -105,8 +113,37 @@ public sealed class FfmpegCameraPreviewService : IDisposable
 
         _ = Task.Run(() => ReadFramesAsync(_process, _cancellation.Token));
         _ = Task.Run(() => ReadErrorsAsync(_process, _cancellation.Token));
-        _ = Task.Run(() => WatchExitAsync(_process, _cancellation.Token));
+        var exitTask = WatchExitAsync(_process, _cancellation.Token);
+        _ = Task.Run(() => exitTask);
         StatusChanged?.Invoke(this, $"Starting preview: {cameraName}");
+
+        try
+        {
+            var firstFrameTask = _firstFrameSignal.Task;
+            var readinessTask = await Task.WhenAny(firstFrameTask, exitTask, Task.Delay(1500, cancellationToken));
+            if (readinessTask == firstFrameTask)
+            {
+                return true;
+            }
+
+            if (readinessTask == exitTask && _process.HasExited)
+            {
+                var error = GetRecentErrorSummary();
+                var message = string.IsNullOrWhiteSpace(error)
+                    ? $"Camera preview stopped with FFmpeg exit code {_process.ExitCode}"
+                    : $"Camera preview stopped with FFmpeg exit code {_process.ExitCode}: {error}";
+                LogCameraLine(message);
+                StatusChanged?.Invoke(this, message);
+                Stop();
+                return false;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            Stop();
+            return false;
+        }
+
         return true;
     }
 
@@ -115,10 +152,14 @@ public sealed class FfmpegCameraPreviewService : IDisposable
         var width = mode?.Width ?? 1280;
         var height = mode?.Height ?? 720;
         var sourceFps = mode?.FramesPerSecond ?? 30d;
+        var targetFps = Math.Clamp(sourceFps, 1d, 15d);
+        var targetWidth = Math.Min(width, 960);
+        var scale = targetWidth / (double)Math.Max(1, width);
+        var targetHeight = Math.Max(2, (int)Math.Round(height * scale / 2d) * 2);
         var filters = new List<string>
         {
-            string.Create(CultureInfo.InvariantCulture, $"fps={sourceFps:0.###}"),
-            $"scale={width}:{height}"
+            string.Create(CultureInfo.InvariantCulture, $"fps={targetFps:0.###}"),
+            $"scale={targetWidth}:{targetHeight}"
         };
 
         if (DenoiseEnabled)
@@ -160,6 +201,7 @@ public sealed class FfmpegCameraPreviewService : IDisposable
         _cancellation?.Cancel();
         _cancellation?.Dispose();
         _cancellation = null;
+        _firstFrameSignal = null;
 
         if (_process is null)
         {
@@ -204,9 +246,11 @@ public sealed class FfmpegCameraPreviewService : IDisposable
 
                 if (!string.IsNullOrWhiteSpace(line))
                 {
+                    AddRecentError(line);
                     var status = SimplifyStatusLine(line);
                     if (status is not null)
                     {
+                        LogCameraLine(status);
                         StatusChanged?.Invoke(this, status);
                     }
                 }
@@ -228,7 +272,12 @@ public sealed class FfmpegCameraPreviewService : IDisposable
             await process.WaitForExitAsync(cancellationToken);
             if (!cancellationToken.IsCancellationRequested && process.ExitCode != 0)
             {
-                StatusChanged?.Invoke(this, $"Camera preview stopped with FFmpeg exit code {process.ExitCode}");
+                var error = GetRecentErrorSummary();
+                var message = string.IsNullOrWhiteSpace(error)
+                    ? $"Camera preview stopped with FFmpeg exit code {process.ExitCode}"
+                    : $"Camera preview stopped with FFmpeg exit code {process.ExitCode}: {error}";
+                LogCameraLine(message);
+                StatusChanged?.Invoke(this, message);
             }
         }
         catch (OperationCanceledException)
@@ -247,7 +296,8 @@ public sealed class FfmpegCameraPreviewService : IDisposable
             || line.Contains("Failed to open NBX hive", StringComparison.OrdinalIgnoreCase)
             || line.Contains("Creating WndMsg Listener Window", StringComparison.OrdinalIgnoreCase)
             || line.Contains("Destroying WndMsg Listener Window", StringComparison.OrdinalIgnoreCase)
-            || line.Contains("Unregistered window class", StringComparison.OrdinalIgnoreCase))
+            || line.Contains("Unregistered window class", StringComparison.OrdinalIgnoreCase)
+            || line.Contains("deprecated pixel format", StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }
@@ -317,6 +367,7 @@ public sealed class FfmpegCameraPreviewService : IDisposable
             var bitmap = CreateBitmap(frameBytes);
             if (bitmap is not null)
             {
+                _firstFrameSignal?.TrySetResult(true);
                 FrameAvailable?.Invoke(this, bitmap);
             }
         }
@@ -351,6 +402,49 @@ public sealed class FfmpegCameraPreviewService : IDisposable
         catch
         {
             return null;
+        }
+    }
+
+    private void ClearRecentErrors()
+    {
+        lock (_errorLock)
+        {
+            _recentErrors.Clear();
+        }
+    }
+
+    private void AddRecentError(string line)
+    {
+        lock (_errorLock)
+        {
+            _recentErrors.Add(line);
+            if (_recentErrors.Count > 12)
+            {
+                _recentErrors.RemoveAt(0);
+            }
+        }
+    }
+
+    private string GetRecentErrorSummary()
+    {
+        lock (_errorLock)
+        {
+            return string.Join(" | ", _recentErrors
+                .Select(SimplifyStatusLine)
+                .Where(line => !string.IsNullOrWhiteSpace(line))
+                .TakeLast(4));
+        }
+    }
+
+    private static void LogCameraLine(string line)
+    {
+        try
+        {
+            var path = Path.Combine(AppContext.BaseDirectory, "EpisodeMonitor-camera.log");
+            File.AppendAllText(path, $"{DateTime.Now:O} {line}{Environment.NewLine}");
+        }
+        catch
+        {
         }
     }
 }
