@@ -28,6 +28,7 @@ public partial class MainWindow : Window
     private readonly FfmpegEventRecorderService _eventRecorder = new();
     private readonly IFaceCueAnalyzer _faceCueAnalyzer = new FaceCueAnalyzer();
     private readonly OpenCvFaceFeatureTracker _faceFeatureTracker = new();
+    private readonly object _faceFeatureTrackerLock = new();
     private readonly ObservableCollection<EpisodeMonitorEvent> _events = [];
     private readonly string _defaultOutputFolder = Path.Combine(AppContext.BaseDirectory, "EpisodeMonitorSessions");
     private readonly object _frameLock = new();
@@ -58,14 +59,17 @@ public partial class MainWindow : Window
     private DateTime _lastRecordedVideoFrameAt = DateTime.MinValue;
     private DateTime _lastPreviewFrameAcceptedAt = DateTime.MinValue;
     private int _uiFramePending;
+    private int _faceFeatureDetectionPending;
     private bool _manualCaptureActive;
     private bool _isCameraEnabled;
     private bool _isUpdatingCameraToggle;
     private bool _isRefreshingCameras;
     private bool _isSnappingSlider;
+    private bool _isClosing;
     private FaceCueGuideLayout? _activeFaceCueLayout;
     private DateTime _lastFaceAutoFollowAt = DateTime.MinValue;
     private DateTime _lastFaceFeatureDetectionAt = DateTime.MinValue;
+    private DateTime _lastFaceFeatureLockAt = DateTime.MinValue;
 
     public MainWindow()
     {
@@ -90,11 +94,15 @@ public partial class MainWindow : Window
 
     private void WindowClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        _isClosing = true;
         _modeLoadCancellation?.Cancel();
         _modeLoadCancellation?.Dispose();
         EndActiveEpisode(DateTime.Now, null, "App closing");
         _calibrationGuardTimer.Stop();
-        _faceFeatureTracker.Dispose();
+        lock (_faceFeatureTrackerLock)
+        {
+            _faceFeatureTracker.Dispose();
+        }
         _eventRecorder.Dispose();
         _previewService.Dispose();
     }
@@ -413,6 +421,7 @@ public partial class MainWindow : Window
                 _currentFaceAnalysis = null;
                 _currentFaceFeatureDetection = FaceFeatureDetection.None;
                 _activeFaceCueLayout = null;
+                _lastFaceFeatureLockAt = DateTime.MinValue;
                 UpdateFaceCueGuideOverlay(_latestFrame);
             }
         }
@@ -468,6 +477,7 @@ public partial class MainWindow : Window
         _currentFaceAnalysis = null;
         _currentFaceFeatureDetection = FaceFeatureDetection.None;
         _activeFaceCueLayout = null;
+        _lastFaceFeatureLockAt = DateTime.MinValue;
         MonitorStatusText.Text = FaceCueCheckBox.IsChecked == true
             ? "Face cue tracking enabled. Sit awake and centered while it calibrates."
             : "Face cue tracking disabled.";
@@ -489,6 +499,7 @@ public partial class MainWindow : Window
         _currentFaceAnalysis = null;
         _currentFaceFeatureDetection = FaceFeatureDetection.None;
         _activeFaceCueLayout = null;
+        _lastFaceFeatureLockAt = DateTime.MinValue;
         MonitorStatusText.Text = "Face cues recalibrating. Sit awake, centered, and naturally alert for a few seconds.";
     }
 
@@ -689,16 +700,9 @@ public partial class MainWindow : Window
         {
             var layout = GetManualFaceCueLayout();
             var now = DateTime.UtcNow;
+            QueueFaceFeatureDetection(bitmap, now);
 
-            if (_faceFeatureTracker.IsAvailable
-                && FaceAutoFollowCheckBox.IsChecked == true
-                && (now - _lastFaceFeatureDetectionAt).TotalMilliseconds >= 500d)
-            {
-                _currentFaceFeatureDetection = _faceFeatureTracker.Detect(bitmap);
-                _lastFaceFeatureDetectionAt = now;
-            }
-
-            if (_currentFaceFeatureDetection.HasFace && FaceAutoFollowCheckBox.IsChecked == true)
+            if (HasUsableFaceFeatureLock(now) && FaceAutoFollowCheckBox.IsChecked == true)
             {
                 var detectedLayout = _currentFaceFeatureDetection.ToGuideLayout(layout);
                 var current = _activeFaceCueLayout ?? detectedLayout;
@@ -727,6 +731,81 @@ public partial class MainWindow : Window
             MonitorStatusText.Text = $"Face cue tracking paused: {ex.Message}";
             return null;
         }
+    }
+
+    private void QueueFaceFeatureDetection(BitmapSource bitmap, DateTime now)
+    {
+        if (_isClosing
+            || !_faceFeatureTracker.IsAvailable
+            || FaceAutoFollowCheckBox.IsChecked != true
+            || (now - _lastFaceFeatureDetectionAt).TotalMilliseconds < 500d)
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _faceFeatureDetectionPending, 1) == 1)
+        {
+            return;
+        }
+
+        _lastFaceFeatureDetectionAt = now;
+        _ = DetectFaceFeaturesAsync(bitmap);
+    }
+
+    private async Task DetectFaceFeaturesAsync(BitmapSource bitmap)
+    {
+        var detection = FaceFeatureDetection.None;
+        try
+        {
+            detection = await Task.Run(() =>
+            {
+                lock (_faceFeatureTrackerLock)
+                {
+                    return _isClosing ? FaceFeatureDetection.None : _faceFeatureTracker.Detect(bitmap);
+                }
+            });
+
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (_isClosing)
+                {
+                    return;
+                }
+
+                var now = DateTime.UtcNow;
+                if (detection.HasFace)
+                {
+                    _currentFaceFeatureDetection = detection;
+                    _lastFaceFeatureLockAt = now;
+                }
+                else if (!HasUsableFaceFeatureLock(now))
+                {
+                    _currentFaceFeatureDetection = FaceFeatureDetection.None;
+                }
+
+                UpdateFaceCueGuideOverlay(_latestFrame);
+            }, DispatcherPriority.Background);
+        }
+        catch (Exception ex)
+        {
+            await Dispatcher.InvokeAsync(() => SetStatus($"Dynamic face tracker paused: {ex.Message}"), DispatcherPriority.Background);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _faceFeatureDetectionPending, 0);
+        }
+    }
+
+    private bool HasUsableFaceFeatureLock(DateTime now)
+    {
+        return _currentFaceFeatureDetection.HasFace
+            && (now - _lastFaceFeatureLockAt).TotalSeconds <= 4d;
+    }
+
+    private bool HasFreshFaceFeatureLock(DateTime now)
+    {
+        return _currentFaceFeatureDetection.HasFace
+            && (now - _lastFaceFeatureLockAt).TotalSeconds <= 1.5d;
     }
 
     private List<string> ProcessFaceCues(DateTime now)
@@ -1280,7 +1359,7 @@ public partial class MainWindow : Window
         AddGuideLine(display, jaw.Left + jaw.Width * 0.16d, jaw.Top + jaw.Height * 0.38d, jaw.Right - jaw.Width * 0.16d, jaw.Top + jaw.Height * 0.38d, lineBrush, 3d);
         AddGuideLine(display, face.Left + face.Width * 0.50d, face.Top, face.Left + face.Width * 0.50d, face.Bottom, supportBrush, 1d);
 
-        if (_currentFaceFeatureDetection.HasFace)
+        if (HasUsableFaceFeatureLock(DateTime.UtcNow))
         {
             var detectorBrush = new SolidColorBrush(Color.FromArgb(230, 244, 211, 94));
             AddGuideRegion(display, _currentFaceFeatureDetection.FaceBox, Brushes.Transparent, detectorBrush, 2d);
@@ -1403,11 +1482,34 @@ public partial class MainWindow : Window
             : _currentFaceAnalysis.Status;
         if (_faceFeatureTracker.IsAvailable && FaceAutoFollowCheckBox.IsChecked == true)
         {
-            var detectionLabel = _currentFaceFeatureDetection.HasFace ? "dynamic face lock" : "dynamic search";
+            var now = DateTime.UtcNow;
+            var detectionLabel = GetFaceFeatureTrackerStatus(now);
             return $"{motionLabel} | {detectionLabel} | {faceLabel}";
         }
 
         return $"{motionLabel} | {faceLabel}";
+    }
+
+    private string GetFaceFeatureTrackerStatus(DateTime now)
+    {
+        if (!_faceFeatureTracker.IsAvailable)
+        {
+            return "dynamic tracker unavailable";
+        }
+
+        if (HasFreshFaceFeatureLock(now))
+        {
+            return "dynamic face lock";
+        }
+
+        if (HasUsableFaceFeatureLock(now))
+        {
+            return "dynamic face hold";
+        }
+
+        return Interlocked.CompareExchange(ref _faceFeatureDetectionPending, 0, 0) == 1
+            ? "dynamic search"
+            : "dynamic waiting";
     }
 
     private void WriteAnnotatedVideoFrame(BitmapSource bitmap, DateTime timestamp, string state, string metrics, string trigger, string accentColor)
