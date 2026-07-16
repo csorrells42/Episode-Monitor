@@ -1,7 +1,13 @@
 bin/
 obj/
+**/bin/
+**/obj/
 .vs/
+.venv/
 *.user
 *.suo
 *.log
 EpisodeMonitorSessions/
+output/
+**/output/
+tmp/
