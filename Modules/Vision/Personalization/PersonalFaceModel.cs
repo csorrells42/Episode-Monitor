@@ -32,6 +32,8 @@ public sealed class PersonalFaceModel
 
     public int LowQualityRejectedSamples { get; set; }
 
+    public int TrackingArtifactRejectedSamples { get; set; }
+
     public int NoFaceRejectedSamples { get; set; }
 
     public int SubjectMismatchRejectedSamples { get; set; }
@@ -54,6 +56,22 @@ public sealed class PersonalFaceModel
 
     public PersonalMetricDistribution FaceHeight { get; set; } = new();
 
+    public PersonalMetricDistribution ZApparentDistanceUnits { get; set; } = new();
+
+    public PersonalMetricDistribution ZRelativeToReference { get; set; } = new();
+
+    public PersonalMetricDistribution ZConfidencePercent { get; set; } = new();
+
+    public int ZEstimateSamples { get; set; }
+
+    public int ZCalibratedSamples { get; set; }
+
+    public int ZCameraFovEstimatedSamples { get; set; }
+
+    public int ZLearnedReferenceSamples { get; set; }
+
+    public int ZApparentOnlySamples { get; set; }
+
     public PersonalMetricDistribution HeadYawDegrees { get; set; } = new();
 
     public PersonalMetricDistribution HeadPitchDegrees { get; set; } = new();
@@ -72,6 +90,14 @@ public sealed class PersonalFaceModel
 
     public PersonalMetricDistribution JawDroopRatio { get; set; } = new();
 
+    public PersonalMetricDistribution LeftBrowHeightRatio { get; set; } = new();
+
+    public PersonalMetricDistribution RightBrowHeightRatio { get; set; } = new();
+
+    public PersonalMetricDistribution AverageBrowHeightRatio { get; set; } = new();
+
+    public PersonalMetricDistribution BrowAsymmetryPercent { get; set; } = new();
+
     public PersonalMetricDistribution MediaPipeAverageEyeBlinkPercent { get; set; } = new();
 
     public PersonalMetricDistribution MediaPipeJawOpenPercent { get; set; } = new();
@@ -87,6 +113,12 @@ public sealed class PersonalFaceModel
     public int IdentitySignatureSamples { get; set; }
 
     public PersonalMetricDistribution FaceAspectRatio { get; set; } = new();
+
+    public PersonalMetricDistribution EyeMidlineXToFaceWidth { get; set; } = new();
+
+    public PersonalMetricDistribution MouthCenterXToFaceWidth { get; set; } = new();
+
+    public PersonalMetricDistribution EyeToMouthXOffsetToFaceWidth { get; set; } = new();
 
     public PersonalMetricDistribution InterEyeDistanceToFaceWidth { get; set; } = new();
 
@@ -138,6 +170,62 @@ public sealed class PersonalFaceModel
     {
         FeatureId = "jaw_shape",
         Label = "Jaw contour shape",
+        Closed = false,
+        PointCount = 9
+    };
+
+    public PersonalFaceContourShapeProfile LeftBrowShape { get; set; } = new()
+    {
+        FeatureId = "left_brow_shape",
+        Label = "Left brow 3D shape",
+        Closed = false,
+        PointCount = 10
+    };
+
+    public PersonalFaceContourShapeProfile RightBrowShape { get; set; } = new()
+    {
+        FeatureId = "right_brow_shape",
+        Label = "Right brow 3D shape",
+        Closed = false,
+        PointCount = 10
+    };
+
+    public PersonalFaceContourShapeProfile NoseBridgeShape { get; set; } = new()
+    {
+        FeatureId = "nose_bridge_shape",
+        Label = "Nose bridge 3D shape",
+        Closed = false,
+        PointCount = 10
+    };
+
+    public PersonalFaceContourShapeProfile NoseBaseShape { get; set; } = new()
+    {
+        FeatureId = "nose_base_shape",
+        Label = "Nose base 3D shape",
+        Closed = false,
+        PointCount = 5
+    };
+
+    public PersonalFaceContourShapeProfile LeftCheekSurface { get; set; } = new()
+    {
+        FeatureId = "left_cheek_surface",
+        Label = "Left cheek 3D surface",
+        Closed = false,
+        PointCount = 6
+    };
+
+    public PersonalFaceContourShapeProfile RightCheekSurface { get; set; } = new()
+    {
+        FeatureId = "right_cheek_surface",
+        Label = "Right cheek 3D surface",
+        Closed = false,
+        PointCount = 6
+    };
+
+    public PersonalFaceContourShapeProfile ForeheadSurface { get; set; } = new()
+    {
+        FeatureId = "forehead_surface",
+        Label = "Forehead 3D surface",
         Closed = false,
         PointCount = 9
     };

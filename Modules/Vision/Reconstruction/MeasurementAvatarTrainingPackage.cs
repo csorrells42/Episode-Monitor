@@ -75,7 +75,11 @@ public sealed class MeasurementAvatarTrainingPackage
 
     public List<PersonalFacePoseBucketProfile> PoseCoverageProfile { get; set; } = [];
 
+    public PersonalFacePoseBucketConsistencyReport PoseBucketConsistency { get; set; } = new();
+
     public Dictionary<string, PersonalFaceContourShapeProfile> ContourShapeProfiles { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public PersonalFaceApertureConsistencyReport ApertureConsistency { get; set; } = new();
 
     public Dictionary<string, MeasurementAvatarTrainingMetric> QualityProfile { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 

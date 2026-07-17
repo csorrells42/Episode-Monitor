@@ -23,6 +23,8 @@ public sealed class FaceLandmarkMetrics
 
     public double MouthMeasurementQualityPercent { get; init; }
 
+    public double BrowMeasurementQualityPercent { get; init; }
+
     public bool EyeImageQualityAvailable { get; init; }
 
     public bool MouthImageQualityAvailable { get; init; }
@@ -93,6 +95,8 @@ public sealed class FaceLandmarkMetrics
         && MouthMeasurementQualityPercent >= 38d
         && TrackingConfidence >= 0.35d;
 
+    public bool IsBrowMeasurementUsable => AverageBrowHeightRatio.HasValue && BrowMeasurementQualityPercent >= 42d;
+
     public string MeasurementQualityLabel
     {
         get
@@ -127,6 +131,12 @@ public sealed class FaceLandmarkMetrics
 
     public double? RawJawDroopRatio { get; init; }
 
+    public double? RawLeftBrowHeightRatio { get; init; }
+
+    public double? RawRightBrowHeightRatio { get; init; }
+
+    public double? RawAverageBrowHeightRatio { get; init; }
+
     public double? LeftEyeOpeningRatio { get; init; }
 
     public double? RightEyeOpeningRatio { get; init; }
@@ -140,6 +150,16 @@ public sealed class FaceLandmarkMetrics
     public double? JawDroopRatio { get; init; }
 
     public double? JawDroopVelocityPerSecond { get; init; }
+
+    public double? LeftBrowHeightRatio { get; init; }
+
+    public double? RightBrowHeightRatio { get; init; }
+
+    public double? AverageBrowHeightRatio { get; init; }
+
+    public double? BrowHeightVelocityPerSecond { get; init; }
+
+    public double? BrowAsymmetryPercent { get; init; }
 
     public double? MediaPipeLeftEyeBlinkPercent { get; init; }
 
@@ -188,6 +208,9 @@ public sealed class FaceLandmarkMetrics
             var jawDroop = JawDroopRatio is double jawRatio
                 ? $", jaw drop {jawRatio * 100d:0}%"
                 : "";
+            var brow = AverageBrowHeightRatio is double browRatio
+                ? $", brow {browRatio * 100d:0}%"
+                : "";
             var agreement = EyeAsymmetryPercent is double
                 ? $", eye agreement {EyeAgreementPercent:0}%"
                 : "";
@@ -201,7 +224,7 @@ public sealed class FaceLandmarkMetrics
             var correction = MediaPipeEyeOpeningCorrected || MediaPipeMouthOpeningCorrected
                 ? $", mp correction eye {FormatSigned(MediaPipeEyeOpeningCorrectionRatio)}, mouth {FormatSigned(MediaPipeMouthOpeningCorrectionRatio)}"
                 : "";
-            return $"landmarks {MeasurementQualityLabel}: {eyes}, {mouth}{jawDroop}, q {OverallMeasurementQualityPercent:0}%{agreement}{artifact}{reconstructed}{blendshape}{correction}";
+            return $"landmarks {MeasurementQualityLabel}: {eyes}, {mouth}{jawDroop}{brow}, q {OverallMeasurementQualityPercent:0}%{agreement}{artifact}{reconstructed}{blendshape}{correction}";
         }
     }
 

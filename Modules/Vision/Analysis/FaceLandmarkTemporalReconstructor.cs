@@ -171,9 +171,14 @@ public sealed class FaceLandmarkTemporalReconstructor
             HeadPitchDegrees = frame.HeadPitchDegrees,
             HeadRollDegrees = frame.HeadRollDegrees,
             BlendshapeScores = frame.BlendshapeScores,
+            DenseMeshTopology = frame.DenseMeshTopology,
+            DenseMeshPoints = frame.DenseMeshPoints,
+            FacialTransformationMatrix = frame.FacialTransformationMatrix,
             FaceContour = frame.FaceContour,
             LeftEyeContour = leftContour,
             RightEyeContour = rightContour,
+            LeftBrowContour = frame.LeftBrowContour,
+            RightBrowContour = frame.RightBrowContour,
             OuterLipContour = frame.OuterLipContour,
             InnerLipContour = innerLipContour,
             JawContour = frame.JawContour
@@ -266,7 +271,13 @@ public sealed class FaceLandmarkTemporalReconstructor
             }
         }
 
-        if (value is double limitedCandidate && previous is double previousRatio)
+        var shouldRateLimit =
+            blendshapeGuidedClosure
+            || guardLowFidelityOpening
+            || featureReconstructed
+            || !hasDirectMeasurement
+            || confidence < 0.72d;
+        if (shouldRateLimit && value is double limitedCandidate && previous is double previousRatio)
         {
             var closingRate = blendshapeGuidedClosure ? 1.20d : 0.24d;
             var openingRate = guardLowFidelityOpening

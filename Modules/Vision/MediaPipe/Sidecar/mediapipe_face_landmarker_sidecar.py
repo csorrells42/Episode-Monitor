@@ -64,6 +64,16 @@ def handle_request(mp, cv2, np, landmarker, request):
             }
             for category in result.face_blendshapes[0]
         ]
+    facial_transformation_matrix = []
+    if result.facial_transformation_matrixes:
+        try:
+            facial_transformation_matrix = (
+                np.asarray(result.facial_transformation_matrixes[0], dtype=float)
+                .reshape(-1)
+                .tolist()
+            )
+        except Exception:
+            facial_transformation_matrix = []
     return {
         "requestId": request_id,
         "ok": True,
@@ -71,6 +81,7 @@ def handle_request(mp, cv2, np, landmarker, request):
         "status": f"MediaPipe dense landmark lock ({len(landmarks)} points, {len(blendshapes)} blendshapes)",
         "landmarks": landmarks,
         "blendshapes": blendshapes,
+        "facialTransformationMatrix": facial_transformation_matrix,
     }
 
 

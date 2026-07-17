@@ -34,9 +34,13 @@ public sealed class PersonalFaceMotionModelBuilder
         var yaw = new DistributionAccumulator();
         var pitch = new DistributionAccumulator();
         var roll = new DistributionAccumulator();
+        var zApparentDistance = new DistributionAccumulator();
+        var zRelativeToReference = new DistributionAccumulator();
+        var zConfidence = new DistributionAccumulator();
         var eyeOpening = new DistributionAccumulator();
         var mouthOpening = new DistributionAccumulator();
         var jawDroop = new DistributionAccumulator();
+        var browHeight = new DistributionAccumulator();
         var mediaPipeBlink = new DistributionAccumulator();
         var mediaPipeJawOpen = new DistributionAccumulator();
         var mediaPipeMouthClose = new DistributionAccumulator();
@@ -46,13 +50,17 @@ public sealed class PersonalFaceMotionModelBuilder
         var mouthClosingVelocity = new DistributionAccumulator();
         var jawDroopVelocity = new DistributionAccumulator();
         var jawRecoveryVelocity = new DistributionAccumulator();
+        var browRaiseVelocity = new DistributionAccumulator();
+        var browLowerVelocity = new DistributionAccumulator();
         var yawVelocity = new DistributionAccumulator();
         var pitchVelocity = new DistributionAccumulator();
         var rollVelocity = new DistributionAccumulator();
+        var zApparentVelocity = new DistributionAccumulator();
         PersonalFaceMotionObservation? previous = null;
         var eyeClosingPairs = 0;
         var eyeClosingWithMouthOpening = 0;
         var eyeClosingWithJawDroop = 0;
+        var eyeClosingWithBrowLowering = 0;
         var mouthOpeningPairs = 0;
         var mouthOpeningWithJawDroop = 0;
 
@@ -87,9 +95,13 @@ public sealed class PersonalFaceMotionModelBuilder
                 yaw.Add(observation.HeadYawDegrees, weight);
                 pitch.Add(observation.HeadPitchDegrees, weight);
                 roll.Add(observation.HeadRollDegrees, weight);
+                zApparentDistance.Add(observation.ZApparentDistanceUnits, weight);
+                zRelativeToReference.Add(observation.ZRelativeToReference, weight);
+                zConfidence.Add(observation.ZConfidencePercent, weight);
                 eyeOpening.Add(observation.AverageEyeOpeningRatio, weight);
                 mouthOpening.Add(observation.MouthOpeningRatio, weight);
                 jawDroop.Add(observation.JawDroopRatio, weight);
+                browHeight.Add(observation.AverageBrowHeightRatio, weight);
                 mediaPipeBlink.Add(observation.MediaPipeAverageEyeBlinkPercent, weight);
                 mediaPipeJawOpen.Add(observation.MediaPipeJawOpenPercent, weight);
                 mediaPipeMouthClose.Add(observation.MediaPipeMouthClosePercent, weight);
@@ -107,17 +119,25 @@ public sealed class PersonalFaceMotionModelBuilder
                         var eyeSlope = Slope(previous.AverageEyeOpeningRatio, observation.AverageEyeOpeningRatio, deltaSeconds);
                         var mouthSlope = Slope(previous.MouthOpeningRatio, observation.MouthOpeningRatio, deltaSeconds);
                         var jawSlope = Slope(previous.JawDroopRatio, observation.JawDroopRatio, deltaSeconds);
+                        var browSlope = Slope(previous.AverageBrowHeightRatio, observation.AverageBrowHeightRatio, deltaSeconds);
 
                         AddSignedVelocity(eyeSlope, eyeClosingVelocity, eyeOpeningVelocity, pairWeight, negativeMeansPrimary: true);
                         AddSignedVelocity(mouthSlope, mouthOpeningVelocity, mouthClosingVelocity, pairWeight, negativeMeansPrimary: false);
                         AddSignedVelocity(jawSlope, jawDroopVelocity, jawRecoveryVelocity, pairWeight, negativeMeansPrimary: false);
+                        AddSignedVelocity(browSlope, browRaiseVelocity, browLowerVelocity, pairWeight, negativeMeansPrimary: false);
                         yawVelocity.Add(Math.Abs((observation.HeadYawDegrees - previous.HeadYawDegrees) / deltaSeconds), pairWeight);
                         pitchVelocity.Add(Math.Abs((observation.HeadPitchDegrees - previous.HeadPitchDegrees) / deltaSeconds), pairWeight);
                         rollVelocity.Add(Math.Abs((observation.HeadRollDegrees - previous.HeadRollDegrees) / deltaSeconds), pairWeight);
+                        var zSlope = Slope(previous.ZApparentDistanceUnits, observation.ZApparentDistanceUnits, deltaSeconds);
+                        if (zSlope is double zVelocity && Math.Abs(zVelocity) >= MotionEpsilonPerSecond)
+                        {
+                            zApparentVelocity.Add(Math.Abs(zVelocity), pairWeight);
+                        }
 
                         var eyeClosing = eyeSlope is < -MotionEpsilonPerSecond;
                         var mouthOpeningNow = mouthSlope is > MotionEpsilonPerSecond;
                         var jawDrooping = jawSlope is > MotionEpsilonPerSecond;
+                        var browLowering = browSlope is < -MotionEpsilonPerSecond;
                         if (eyeClosing)
                         {
                             eyeClosingPairs++;
@@ -129,6 +149,11 @@ public sealed class PersonalFaceMotionModelBuilder
                             if (jawDrooping)
                             {
                                 eyeClosingWithJawDroop++;
+                            }
+
+                            if (browLowering)
+                            {
+                                eyeClosingWithBrowLowering++;
                             }
                         }
 
@@ -152,9 +177,13 @@ public sealed class PersonalFaceMotionModelBuilder
         model.HeadYawDegrees = yaw.ToModel();
         model.HeadPitchDegrees = pitch.ToModel();
         model.HeadRollDegrees = roll.ToModel();
+        model.ZApparentDistanceUnits = zApparentDistance.ToModel();
+        model.ZRelativeToReference = zRelativeToReference.ToModel();
+        model.ZConfidencePercent = zConfidence.ToModel();
         model.AverageEyeOpeningRatio = eyeOpening.ToModel();
         model.MouthOpeningRatio = mouthOpening.ToModel();
         model.JawDroopRatio = jawDroop.ToModel();
+        model.AverageBrowHeightRatio = browHeight.ToModel();
         model.MediaPipeAverageEyeBlinkPercent = mediaPipeBlink.ToModel();
         model.MediaPipeJawOpenPercent = mediaPipeJawOpen.ToModel();
         model.MediaPipeMouthClosePercent = mediaPipeMouthClose.ToModel();
@@ -164,11 +193,15 @@ public sealed class PersonalFaceMotionModelBuilder
         model.MouthClosingVelocityPerSecond = mouthClosingVelocity.ToModel();
         model.JawDroopVelocityPerSecond = jawDroopVelocity.ToModel();
         model.JawRecoveryVelocityPerSecond = jawRecoveryVelocity.ToModel();
+        model.BrowRaiseVelocityPerSecond = browRaiseVelocity.ToModel();
+        model.BrowLowerVelocityPerSecond = browLowerVelocity.ToModel();
         model.HeadYawVelocityDegreesPerSecond = yawVelocity.ToModel();
         model.HeadPitchVelocityDegreesPerSecond = pitchVelocity.ToModel();
         model.HeadRollVelocityDegreesPerSecond = rollVelocity.ToModel();
+        model.ZApparentVelocityUnitsPerSecond = zApparentVelocity.ToModel();
         model.EyeClosingWithMouthOpeningRate = Rate(eyeClosingWithMouthOpening, eyeClosingPairs);
         model.EyeClosingWithJawDroopRate = Rate(eyeClosingWithJawDroop, eyeClosingPairs);
+        model.EyeClosingWithBrowLoweringRate = Rate(eyeClosingWithBrowLowering, eyeClosingPairs);
         model.MouthOpeningWithJawDroopRate = Rate(mouthOpeningWithJawDroop, mouthOpeningPairs);
         AddWarnings(model);
         return model;

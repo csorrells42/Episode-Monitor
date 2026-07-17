@@ -7,11 +7,15 @@ public sealed class FaceLandmarkMetricCalculator
 {
     private double? _previousMouthOpeningRatio;
     private double? _previousJawDroopRatio;
+    private double? _previousAverageBrowHeightRatio;
     private double? _smoothedLeftEyeOpeningRatio;
     private double? _smoothedRightEyeOpeningRatio;
     private double? _smoothedAverageEyeOpeningRatio;
     private double? _smoothedMouthOpeningRatio;
     private double? _smoothedJawDroopRatio;
+    private double? _smoothedLeftBrowHeightRatio;
+    private double? _smoothedRightBrowHeightRatio;
+    private double? _smoothedAverageBrowHeightRatio;
     private double? _mediaPipeOpenEyeReferenceRatio;
     private double? _mediaPipeClosedMouthReferenceRatio;
     private DateTime? _previousCapturedAtUtc;
@@ -57,23 +61,34 @@ public sealed class FaceLandmarkMetricCalculator
         UpdateMediaPipeClosedMouthReference(frame, mouthOpening, mediaPipeJawOpen, mediaPipeMouthClose);
         var stabilizedMouthOpening = StabilizeMouthOpeningWithMediaPipe(mouthOpening, mediaPipeJawOpen, mediaPipeMouthClose);
         var mediaPipeMouthOpeningCorrection = CalculateCorrection(stabilizedMouthOpening, mouthOpening);
-        var jawDroop = CalculateJawDroopRatio(frame);
+        var jawDroop = CalculateJawDroopRatio(frame, mediaPipeJawOpen);
+        var brow = CalculateBrowHeight(frame);
         var eyeQuality = CalculateEyeMeasurementQuality(frame, stabilizedLeftEyeOpening, stabilizedRightEyeOpening, stabilizedAverageEyeOpening, possibleOneEyeArtifact);
         var mouthQuality = CalculateMouthMeasurementQuality(frame, stabilizedMouthOpening);
+        var browQuality = CalculateBrowMeasurementQuality(frame, brow.Average, brow.AsymmetryPercent);
         var smoothing = CalculateSmoothingFactor(frame);
         _smoothedLeftEyeOpeningRatio = Smooth(_smoothedLeftEyeOpeningRatio, stabilizedLeftEyeOpening, smoothing);
         _smoothedRightEyeOpeningRatio = Smooth(_smoothedRightEyeOpeningRatio, stabilizedRightEyeOpening, smoothing);
         _smoothedAverageEyeOpeningRatio = Smooth(_smoothedAverageEyeOpeningRatio, stabilizedAverageEyeOpening, smoothing);
         _smoothedMouthOpeningRatio = Smooth(_smoothedMouthOpeningRatio, stabilizedMouthOpening, smoothing);
         _smoothedJawDroopRatio = Smooth(_smoothedJawDroopRatio, jawDroop, smoothing);
+        _smoothedLeftBrowHeightRatio = Smooth(_smoothedLeftBrowHeightRatio, brow.Left, smoothing);
+        _smoothedRightBrowHeightRatio = Smooth(_smoothedRightBrowHeightRatio, brow.Right, smoothing);
+        _smoothedAverageBrowHeightRatio = Smooth(_smoothedAverageBrowHeightRatio, brow.Average, smoothing);
         var mouthVelocity = CalculateVelocity(frame.CapturedAtUtc, _smoothedMouthOpeningRatio, _previousMouthOpeningRatio);
         var jawDroopVelocity = CalculateVelocity(frame.CapturedAtUtc, _smoothedJawDroopRatio, _previousJawDroopRatio);
+        var browVelocity = CalculateVelocity(frame.CapturedAtUtc, _smoothedAverageBrowHeightRatio, _previousAverageBrowHeightRatio);
         var eyeAsymmetry = CalculateAsymmetryPercent(
             _smoothedLeftEyeOpeningRatio,
             _smoothedRightEyeOpeningRatio,
             _smoothedAverageEyeOpeningRatio);
+        var browAsymmetry = CalculateAsymmetryPercent(
+            _smoothedLeftBrowHeightRatio,
+            _smoothedRightBrowHeightRatio,
+            _smoothedAverageBrowHeightRatio);
         _previousMouthOpeningRatio = _smoothedMouthOpeningRatio;
         _previousJawDroopRatio = _smoothedJawDroopRatio;
+        _previousAverageBrowHeightRatio = _smoothedAverageBrowHeightRatio;
         _previousCapturedAtUtc = frame.CapturedAtUtc;
 
         return new FaceLandmarkMetrics
@@ -87,6 +102,7 @@ public sealed class FaceLandmarkMetricCalculator
             MouthConfidence = frame.MouthConfidence,
             EyeMeasurementQualityPercent = eyeQuality,
             MouthMeasurementQualityPercent = mouthQuality,
+            BrowMeasurementQualityPercent = browQuality,
             EyeImageQualityAvailable = frame.EyeImageQualityAvailable,
             MouthImageQualityAvailable = frame.MouthImageQualityAvailable,
             EyeGlarePercent = frame.EyeGlarePercent,
@@ -109,6 +125,9 @@ public sealed class FaceLandmarkMetricCalculator
             RawAverageEyeOpeningRatio = averageEyeOpening,
             RawMouthOpeningRatio = mouthOpening,
             RawJawDroopRatio = jawDroop,
+            RawLeftBrowHeightRatio = brow.Left,
+            RawRightBrowHeightRatio = brow.Right,
+            RawAverageBrowHeightRatio = brow.Average,
             LeftEyeOpeningRatio = _smoothedLeftEyeOpeningRatio,
             RightEyeOpeningRatio = _smoothedRightEyeOpeningRatio,
             AverageEyeOpeningRatio = _smoothedAverageEyeOpeningRatio,
@@ -116,6 +135,11 @@ public sealed class FaceLandmarkMetricCalculator
             MouthOpeningVelocityPerSecond = mouthVelocity,
             JawDroopRatio = _smoothedJawDroopRatio,
             JawDroopVelocityPerSecond = jawDroopVelocity,
+            LeftBrowHeightRatio = _smoothedLeftBrowHeightRatio,
+            RightBrowHeightRatio = _smoothedRightBrowHeightRatio,
+            AverageBrowHeightRatio = _smoothedAverageBrowHeightRatio,
+            BrowHeightVelocityPerSecond = browVelocity,
+            BrowAsymmetryPercent = browAsymmetry,
             MediaPipeLeftEyeBlinkPercent = mediaPipeLeftBlink,
             MediaPipeRightEyeBlinkPercent = mediaPipeRightBlink,
             MediaPipeAverageEyeBlinkPercent = mediaPipeAverageBlink,
@@ -133,11 +157,15 @@ public sealed class FaceLandmarkMetricCalculator
     {
         _previousMouthOpeningRatio = null;
         _previousJawDroopRatio = null;
+        _previousAverageBrowHeightRatio = null;
         _smoothedLeftEyeOpeningRatio = null;
         _smoothedRightEyeOpeningRatio = null;
         _smoothedAverageEyeOpeningRatio = null;
         _smoothedMouthOpeningRatio = null;
         _smoothedJawDroopRatio = null;
+        _smoothedLeftBrowHeightRatio = null;
+        _smoothedRightBrowHeightRatio = null;
+        _smoothedAverageBrowHeightRatio = null;
         _mediaPipeOpenEyeReferenceRatio = null;
         _mediaPipeClosedMouthReferenceRatio = null;
         _previousCapturedAtUtc = null;
@@ -239,6 +267,36 @@ public sealed class FaceLandmarkMetricCalculator
         }
 
         quality *= CalculateSourceQualityMultiplier(frame.Source, isEye: false);
+        return Math.Clamp(quality, 0d, 100d);
+    }
+
+    private static double CalculateBrowMeasurementQuality(
+        FaceLandmarkFrame frame,
+        double? averageBrowHeight,
+        double? browAsymmetryPercent)
+    {
+        if (averageBrowHeight is not double height)
+        {
+            return 0d;
+        }
+
+        var quality = Math.Min(Math.Clamp(frame.TrackingConfidence, 0d, 1d), Math.Clamp(frame.EyeConfidence, 0d, 1d)) * 100d;
+        if (frame.LeftBrowContour.Count < 5 || frame.RightBrowContour.Count < 5)
+        {
+            quality *= 0.72d;
+        }
+
+        if (height < 0.025d || height > 0.38d)
+        {
+            quality *= 0.74d;
+        }
+
+        if (browAsymmetryPercent is double asymmetry && asymmetry > 95d)
+        {
+            quality *= 0.82d;
+        }
+
+        quality *= CalculateSourceQualityMultiplier(frame.Source, isEye: true);
         return Math.Clamp(quality, 0d, 100d);
     }
 
@@ -354,7 +412,7 @@ public sealed class FaceLandmarkMetricCalculator
             cappedAverage);
     }
 
-    private static double? CalculateJawDroopRatio(FaceLandmarkFrame frame)
+    private static double? CalculateJawDroopRatio(FaceLandmarkFrame frame, double? mediaPipeJawOpenPercent)
     {
         if (frame.JawContour.Count < 3)
         {
@@ -398,7 +456,78 @@ public sealed class FaceLandmarkMetricCalculator
 
         var eyeProjection = Dot(eyePoint, vertical);
         var chinProjection = frame.JawContour.Max(point => Dot(point, vertical));
-        return Math.Clamp((chinProjection - eyeProjection) / faceWidth, 0d, 1.5d);
+        var absoluteLowerFaceSpan = (chinProjection - eyeProjection) / faceWidth;
+        var contourDroop = Math.Clamp((absoluteLowerFaceSpan - 0.92d) * 0.42d, 0d, 0.35d);
+        if (mediaPipeJawOpenPercent is not double jawOpen || double.IsNaN(jawOpen) || double.IsInfinity(jawOpen))
+        {
+            return contourDroop;
+        }
+
+        var mediaPipeDroop = Math.Clamp(jawOpen / 100d * 0.35d, 0d, 0.35d);
+        return Math.Max(contourDroop, mediaPipeDroop);
+    }
+
+    private static (double? Left, double? Right, double? Average, double? AsymmetryPercent) CalculateBrowHeight(FaceLandmarkFrame frame)
+    {
+        if (frame.LeftBrowContour.Count < 2
+            || frame.RightBrowContour.Count < 2
+            || frame.LeftEyeContour.Count < 2
+            || frame.RightEyeContour.Count < 2)
+        {
+            return (null, null, null, null);
+        }
+
+        var leftBrowCenter = Center(frame.LeftBrowContour);
+        var rightBrowCenter = Center(frame.RightBrowContour);
+        var leftEyeCenter = Center(frame.LeftEyeContour);
+        var rightEyeCenter = Center(frame.RightEyeContour);
+        if (leftBrowCenter is not Point leftBrow
+            || rightBrowCenter is not Point rightBrow
+            || leftEyeCenter is not Point leftEye
+            || rightEyeCenter is not Point rightEye)
+        {
+            return (null, null, null, null);
+        }
+
+        var horizontal = CreateFaceHorizontalAxis(leftEyeCenter, rightEyeCenter);
+        var vertical = new Vector(-horizontal.Y, horizontal.X);
+        if (vertical.Y < 0d)
+        {
+            vertical = new Vector(-vertical.X, -vertical.Y);
+        }
+
+        var faceWidth = CalculateProjectedFaceWidth(frame, horizontal);
+        if (faceWidth <= 0.001d)
+        {
+            return (null, null, null, null);
+        }
+
+        var leftHeight = Math.Clamp((Dot(leftEye, vertical) - Dot(leftBrow, vertical)) / faceWidth, 0d, 0.60d);
+        var rightHeight = Math.Clamp((Dot(rightEye, vertical) - Dot(rightBrow, vertical)) / faceWidth, 0d, 0.60d);
+        var average = (leftHeight + rightHeight) / 2d;
+        var asymmetry = CalculateAsymmetryPercent(leftHeight, rightHeight, average);
+        return (leftHeight, rightHeight, average, asymmetry);
+    }
+
+    private static double CalculateProjectedFaceWidth(FaceLandmarkFrame frame, Vector horizontal)
+    {
+        var points = frame.FaceContour
+            .Concat(frame.JawContour)
+            .Concat(frame.LeftBrowContour)
+            .Concat(frame.RightBrowContour)
+            .Concat(frame.LeftEyeContour)
+            .Concat(frame.RightEyeContour)
+            .Concat(frame.OuterLipContour)
+            .Concat(frame.InnerLipContour)
+            .ToList();
+        if (points.Count < 2)
+        {
+            return 0d;
+        }
+
+        var left = points.Min(point => Dot(point, horizontal));
+        var right = points.Max(point => Dot(point, horizontal));
+        return Math.Max(0d, right - left);
     }
 
     private static Vector CreateFaceHorizontalAxis(Point? leftEyeCenter, Point? rightEyeCenter)
@@ -465,11 +594,17 @@ public sealed class FaceLandmarkMetricCalculator
 
         var glareOrWeakImageEvidence = frame.EyeImageQualityAvailable
             && (frame.EyeGlarePercent >= 5d || frame.EyeContrastPercent < 35d || frame.EyeSharpnessPercent < 25d);
-        var suppressedOrWeakReconstruction = frame.EyeArtifactSuppressed
-            || ((frame.LeftEyeReconstructed || frame.RightEyeReconstructed) && frame.EyeConfidence < 0.45d);
-        return asymmetry >= 85d
+        var reconstructedOrSuppressed = frame.EyeArtifactSuppressed
+            || frame.LeftEyeReconstructed
+            || frame.RightEyeReconstructed;
+        var highFidelityDirectEye = IsHighFidelityLandmarkSource(frame.Source)
+            && frame.EyeConfidence >= 0.72d
+            && !reconstructedOrSuppressed;
+        return (asymmetry >= 85d
+                && !highFidelityDirectEye
+                && (glareOrWeakImageEvidence || reconstructedOrSuppressed || frame.EyeConfidence < 0.58d))
             || (asymmetry >= 55d && glareOrWeakImageEvidence)
-            || (asymmetry >= 45d && suppressedOrWeakReconstruction);
+            || (asymmetry >= 45d && reconstructedOrSuppressed && frame.EyeConfidence < 0.72d);
     }
 
     private static double? Average(double? first, double? second)

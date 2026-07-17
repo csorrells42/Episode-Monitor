@@ -19,6 +19,8 @@ using WpfRect = System.Windows.Rect;
 
 internal static class Program
 {
+    private const double OfflineReferenceHorizontalFovDegrees = 71.4d;
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -46,7 +48,7 @@ internal static class Program
             var result = IsImagePath(inputPath)
                 ? EvaluateImage(inputPath, outputFolder, eyeInsetRegion, writeOverlays)
                 : EvaluateVideo(inputPath, outputFolder, sampleFps, eyeInsetRegion, writeOverlays);
-            WriteOutputs(inputPath, outputFolder, sampleFps, eyeInsetRegion, writeOverlays, result.Records, result.PersonalModel);
+            WriteOutputs(inputPath, outputFolder, sampleFps, result.AppliedEyeInsetRegion, writeOverlays, result.Records, result.PersonalModel);
             Console.WriteLine($"Vision evaluation wrote {result.Records.Count} frame record(s) to {outputFolder}");
             return result.Records.Count == 0 ? 1 : 0;
         }
@@ -75,6 +77,7 @@ internal static class Program
         var cueAnalyzer = new FaceLandmarkCueAnalyzer();
         var trendAnalyzer = new FaceLandmarkTrendAnalyzer();
         var stabilityAnalyzer = new FaceLockStabilityAnalyzer();
+        var headPoseEstimator = new HeadPoseEstimator();
         var eyeInsetCueAnalyzer = new EyeInsetCueAnalyzer();
         var personalModelBuilder = new PersonalFaceModelBuilder();
         var captureQualityAnalyzer = new PersonalFaceCaptureQualityAnalyzer();
@@ -87,6 +90,7 @@ internal static class Program
             cueAnalyzer,
             trendAnalyzer,
             stabilityAnalyzer,
+            headPoseEstimator,
             eyeInsetCueAnalyzer,
             personalModelBuilder,
             captureQualityAnalyzer,
@@ -99,7 +103,7 @@ internal static class Program
             eyeInsetRegion,
             CreateOverlayFolder(outputFolder, writeOverlays))
         };
-        return new VisionEvaluationResult(records, personalModelBuilder.CurrentModel);
+        return new VisionEvaluationResult(records, personalModelBuilder.CurrentModel, eyeInsetRegion);
     }
 
     private static VisionEvaluationResult EvaluateVideo(
@@ -121,6 +125,7 @@ internal static class Program
         var cueAnalyzer = new FaceLandmarkCueAnalyzer();
         var trendAnalyzer = new FaceLandmarkTrendAnalyzer();
         var stabilityAnalyzer = new FaceLockStabilityAnalyzer();
+        var headPoseEstimator = new HeadPoseEstimator();
         var eyeInsetCueAnalyzer = new EyeInsetCueAnalyzer();
         var personalModelBuilder = new PersonalFaceModelBuilder();
         var captureQualityAnalyzer = new PersonalFaceCaptureQualityAnalyzer();
@@ -151,6 +156,7 @@ internal static class Program
                     cueAnalyzer,
                     trendAnalyzer,
                     stabilityAnalyzer,
+                    headPoseEstimator,
                     eyeInsetCueAnalyzer,
                     personalModelBuilder,
                     captureQualityAnalyzer,
@@ -167,7 +173,7 @@ internal static class Program
             frameIndex++;
         }
 
-        return new VisionEvaluationResult(records, personalModelBuilder.CurrentModel);
+        return new VisionEvaluationResult(records, personalModelBuilder.CurrentModel, selectedEyeInsetRegion);
     }
 
     private static EyeInsetRegion? SelectAutoEyeInsetRegion(VideoCapture capture, int frameStep)
@@ -208,6 +214,7 @@ internal static class Program
         FaceLandmarkCueAnalyzer cueAnalyzer,
         FaceLandmarkTrendAnalyzer trendAnalyzer,
         FaceLockStabilityAnalyzer stabilityAnalyzer,
+        HeadPoseEstimator headPoseEstimator,
         EyeInsetCueAnalyzer eyeInsetCueAnalyzer,
         PersonalFaceModelBuilder personalModelBuilder,
         PersonalFaceCaptureQualityAnalyzer captureQualityAnalyzer,
@@ -225,6 +232,14 @@ internal static class Program
         var result = tracker.Detect(bitmap, capturedAtUtc);
         var reconstructedFrame = reconstructor.Update(result.LandmarkFrame);
         var metrics = calculator.Update(reconstructedFrame);
+        var headPose = headPoseEstimator.Estimate(new HeadPoseEstimatorInput
+        {
+            Frame = reconstructedFrame,
+            FrameWidthPixels = frameWidth,
+            FrameHeightPixels = frameHeight,
+            Calibration = CreateOfflineHeadPoseCalibration(personalModelBuilder.CurrentModel)
+        });
+        var identityMeasurement = PersonalFaceIdentityMeasurement.FromFrame(reconstructedFrame);
         var cue = cueAnalyzer.Analyze(metrics);
         var trend = trendAnalyzer.Update(metrics);
         var stability = stabilityAnalyzer.Update(result.FeatureDetection, reconstructedFrame, metrics);
@@ -264,6 +279,7 @@ internal static class Program
                 stability,
                 cue,
                 trend,
+                headPose,
                 allowEventLikeMeasurements: true);
             captureQuality = captureQualityAnalyzer.Analyze(new PersonalFaceCaptureQualityInput
             {
@@ -381,6 +397,29 @@ internal static class Program
             result.FeatureDetection.FaceBox.Top,
             result.FeatureDetection.FaceBox.Width,
             result.FeatureDetection.FaceBox.Height,
+            headPose.ApparentDistanceUnits,
+            headPose.ZRelativeToReference,
+            headPose.ZConfidencePercent,
+            headPose.ZEstimateKind,
+            headPose.ZQualityLabel,
+            headPose.DistanceSource,
+            headPose.DistanceInches,
+            headPose.DistanceCalibrated,
+            headPose.ZUsesCameraFov,
+            headPose.ZUsesLearnedReference,
+            identityMeasurement.HasMeasurement,
+            identityMeasurement.UsableFeatureCount,
+            identityMeasurement.FaceAspectRatio,
+            identityMeasurement.EyeMidlineXToFaceWidth,
+            identityMeasurement.MouthCenterXToFaceWidth,
+            identityMeasurement.EyeToMouthXOffsetToFaceWidth,
+            identityMeasurement.InterEyeDistanceToFaceWidth,
+            identityMeasurement.LeftEyeWidthToFaceWidth,
+            identityMeasurement.RightEyeWidthToFaceWidth,
+            identityMeasurement.MouthWidthToFaceWidth,
+            identityMeasurement.EyeMidlineYToFaceHeight,
+            identityMeasurement.MouthCenterYToFaceHeight,
+            identityMeasurement.EyeToMouthYDistanceToFaceHeight,
             inset?.RegionLabel ?? "",
             inset?.Status ?? "",
             inset?.HasMeasurement == true,
@@ -452,6 +491,49 @@ internal static class Program
         return record;
     }
 
+    private static HeadPoseCalibration CreateOfflineHeadPoseCalibration(PersonalFaceModel model)
+    {
+        var reference = TryEstimateLearnedReferenceInterEyeFrameWidth(model, out var referenceSamples);
+        return new HeadPoseCalibration
+        {
+            CameraHorizontalFovDegrees = OfflineReferenceHorizontalFovDegrees,
+            ReferenceInterEyeFrameWidth = reference,
+            ReferenceSampleCount = referenceSamples,
+            ReferenceSource = reference is > 0d
+                ? $"offline learned {model.SubjectDisplayName} face scale ({referenceSamples} samples)"
+                : ""
+        };
+    }
+
+    private static double? TryEstimateLearnedReferenceInterEyeFrameWidth(
+        PersonalFaceModel model,
+        out int referenceSamples)
+    {
+        referenceSamples = Math.Min(model.FaceWidth.SampleCount, model.InterEyeDistanceToFaceWidth.SampleCount);
+        if (referenceSamples < 18)
+        {
+            return null;
+        }
+
+        var faceWidth = MetricValue(model.FaceWidth);
+        var interEyeToFaceWidth = MetricValue(model.InterEyeDistanceToFaceWidth);
+        if (faceWidth is not > 0.04d or > 0.95d
+            || interEyeToFaceWidth is not > 0.08d or > 0.75d)
+        {
+            return null;
+        }
+
+        var interEyeFrameWidth = faceWidth.Value * interEyeToFaceWidth.Value;
+        return interEyeFrameWidth is > 0.01d and < 0.75d
+            ? interEyeFrameWidth
+            : null;
+    }
+
+    private static double? MetricValue(PersonalMetricDistribution distribution)
+    {
+        return distribution.ExponentialMovingAverage ?? distribution.Average;
+    }
+
     private static PersonalFaceModelRejectionKind CaptureQualityRejectionKind(PersonalFaceCaptureQualityAssessment captureQuality)
     {
         return captureQuality.Label.Equals("no-face", StringComparison.OrdinalIgnoreCase)
@@ -506,7 +588,7 @@ internal static class Program
     {
         var csvPath = Path.Combine(outputFolder, "vision_eval.csv");
         var builder = new StringBuilder();
-        builder.AppendLine("FrameIndex,TimestampSeconds,Backend,BackendStatus,HasFace,Confidence,TrackingConfidence,EyeConfidence,MouthConfidence,EyeQuality,MouthQuality,OverallQuality,HeadYaw,HeadPitch,HeadRoll,FaceReliabilityStatus,FaceReliabilitySamples,FaceReliability,FaceContinuity,EyeReliability,MouthReliability,FaceBoundsRate,EyeUsableRate,MouthUsableRate,EyeImageQualityAvailable,MouthImageQualityAvailable,EyeGlare,MouthGlare,EyeContrast,MouthContrast,EyeSharpness,MouthSharpness,EyeDarkCoverage,MouthDarkCoverage,RawEyeAsymmetry,EyeAsymmetry,EyeAgreement,PossibleOneEyeArtifact,LeftEyeReconstructed,RightEyeReconstructed,MouthReconstructed,EyeArtifactSuppressed,EyeUsable,MouthUsable,RawLeftEyeOpening,RawRightEyeOpening,RawAverageEyeOpening,RawMouthOpening,LeftEyeOpening,RightEyeOpening,AverageEyeOpening,MouthOpening,MouthOpeningVelocity,RawJawDroop,JawDroop,JawDroopVelocity,MediaPipeLeftEyeBlink,MediaPipeRightEyeBlink,MediaPipeAverageEyeBlink,MediaPipeJawOpen,MediaPipeMouthClose,MediaPipeEyeOpeningCorrection,MediaPipeMouthOpeningCorrection,MediaPipeEyeOpeningCorrected,MediaPipeMouthOpeningCorrected,CueStatus,CueUsable,CueBaselineReady,CueBaselineSamples,CueEyeEligible,CueMouthEligible,CueEyeClosure,CueMouthOpeningChange,CueJawDroopBaseline,CueJawDroopChange,CueScore,CueMediaPipeBlinkBaselineReady,CueMediaPipeMouthBaselineReady,CueMediaPipeBlinkBaseline,CueMediaPipeJawOpenBaseline,CueMediaPipeMouthCloseBaseline,CueMediaPipeBlinkChange,CueMediaPipeJawOpenChange,CueMediaPipeMouthCloseDrop,CueMediaPipeMouthOpeningEvidence,TrendStatus,TrendUsable,EyeClosingTrend,MouthOpeningTrend,TrendEyeSlope,TrendMouthSlope,TrendCueScore,FaceLeft,FaceTop,FaceWidth,FaceHeight,EyeInsetRegion,EyeInsetStatus,EyeInsetHasMeasurement,EyeInsetLeftOpening,EyeInsetRightOpening,EyeInsetAverageOpening,EyeInsetLeftConfidence,EyeInsetRightConfidence,EyeInsetConfidence,EyeInsetImageQualityAvailable,EyeInsetGlare,EyeInsetContrast,EyeInsetSharpness,EyeInsetDarkCoverage,EyeInsetRegionLeft,EyeInsetRegionTop,EyeInsetRegionWidth,EyeInsetRegionHeight,EyeInsetCueStatus,EyeInsetCueHasMeasurement,EyeInsetCueBaselineReady,EyeInsetCueBaselineSamples,EyeInsetCueEligible,EyeInsetCueQuality,EyeInsetCueOpening,EyeInsetCueBaselineOpening,EyeInsetCueClosure,EyeInsetCueScore,PersonalModelAccepted,PersonalModelRejectionKind,PersonalModelUpdateReason,PersonalIdentityStatus,PersonalIdentityConfidence,PersonalIdentityComparedFeatures,PersonalIdentityOutlierFeatures,CaptureQualityLabel,CaptureQualityScore,CaptureQualityCanCollect,CaptureQualityAvatarGrade,CaptureQualityReason,CaptureQualityCameraModeScore,CaptureQualityFaceScaleScore,CaptureQualityEyeScore,CaptureQualityMouthScore,CaptureQualityStabilityScore,CaptureQualityGlassesScore,CaptureQualityStorageScore,CaptureQualityFaceWidthPercent,CaptureQualityFaceHeightPercent,CaptureQualityIssues,CaptureQualitySuggestions");
+        builder.AppendLine("FrameIndex,TimestampSeconds,Backend,BackendStatus,HasFace,Confidence,TrackingConfidence,EyeConfidence,MouthConfidence,EyeQuality,MouthQuality,OverallQuality,ARotationAroundXDegrees,BRotationAroundYDegrees,CRotationAroundZDegrees,FaceReliabilityStatus,FaceReliabilitySamples,FaceReliability,FaceContinuity,EyeReliability,MouthReliability,FaceBoundsRate,EyeUsableRate,MouthUsableRate,EyeImageQualityAvailable,MouthImageQualityAvailable,EyeGlare,MouthGlare,EyeContrast,MouthContrast,EyeSharpness,MouthSharpness,EyeDarkCoverage,MouthDarkCoverage,RawEyeAsymmetry,EyeAsymmetry,EyeAgreement,PossibleOneEyeArtifact,LeftEyeReconstructed,RightEyeReconstructed,MouthReconstructed,EyeArtifactSuppressed,EyeUsable,MouthUsable,RawLeftEyeOpening,RawRightEyeOpening,RawAverageEyeOpening,RawMouthOpening,LeftEyeOpening,RightEyeOpening,AverageEyeOpening,MouthOpening,MouthOpeningVelocity,RawJawDroop,JawDroop,JawDroopVelocity,MediaPipeLeftEyeBlink,MediaPipeRightEyeBlink,MediaPipeAverageEyeBlink,MediaPipeJawOpen,MediaPipeMouthClose,MediaPipeEyeOpeningCorrection,MediaPipeMouthOpeningCorrection,MediaPipeEyeOpeningCorrected,MediaPipeMouthOpeningCorrected,CueStatus,CueUsable,CueBaselineReady,CueBaselineSamples,CueEyeEligible,CueMouthEligible,CueEyeClosure,CueMouthOpeningChange,CueJawDroopBaseline,CueJawDroopChange,CueScore,CueMediaPipeBlinkBaselineReady,CueMediaPipeMouthBaselineReady,CueMediaPipeBlinkBaseline,CueMediaPipeJawOpenBaseline,CueMediaPipeMouthCloseBaseline,CueMediaPipeBlinkChange,CueMediaPipeJawOpenChange,CueMediaPipeMouthCloseDrop,CueMediaPipeMouthOpeningEvidence,TrendStatus,TrendUsable,EyeClosingTrend,MouthOpeningTrend,TrendEyeSlope,TrendMouthSlope,TrendCueScore,FaceLeft,FaceTop,FaceWidth,FaceHeight,ZApparentDistanceUnits,ZRelativeToReference,ZConfidencePercent,ZEstimateKind,ZQualityLabel,ZDistanceSource,DistanceInches,DistanceCalibrated,ZUsesCameraFov,ZUsesLearnedReference,IdentityMeasurementAvailable,IdentityUsableFeatureCount,FaceAspectRatio,EyeMidlineXToFaceWidth,MouthCenterXToFaceWidth,EyeToMouthXOffsetToFaceWidth,InterEyeDistanceToFaceWidth,LeftEyeWidthToFaceWidth,RightEyeWidthToFaceWidth,MouthWidthToFaceWidth,EyeMidlineYToFaceHeight,MouthCenterYToFaceHeight,EyeToMouthYDistanceToFaceHeight,EyeInsetRegion,EyeInsetStatus,EyeInsetHasMeasurement,EyeInsetLeftOpening,EyeInsetRightOpening,EyeInsetAverageOpening,EyeInsetLeftConfidence,EyeInsetRightConfidence,EyeInsetConfidence,EyeInsetImageQualityAvailable,EyeInsetGlare,EyeInsetContrast,EyeInsetSharpness,EyeInsetDarkCoverage,EyeInsetRegionLeft,EyeInsetRegionTop,EyeInsetRegionWidth,EyeInsetRegionHeight,EyeInsetCueStatus,EyeInsetCueHasMeasurement,EyeInsetCueBaselineReady,EyeInsetCueBaselineSamples,EyeInsetCueEligible,EyeInsetCueQuality,EyeInsetCueOpening,EyeInsetCueBaselineOpening,EyeInsetCueClosure,EyeInsetCueScore,PersonalModelAccepted,PersonalModelRejectionKind,PersonalModelUpdateReason,PersonalIdentityStatus,PersonalIdentityConfidence,PersonalIdentityComparedFeatures,PersonalIdentityOutlierFeatures,CaptureQualityLabel,CaptureQualityScore,CaptureQualityCanCollect,CaptureQualityAvatarGrade,CaptureQualityReason,CaptureQualityCameraModeScore,CaptureQualityFaceScaleScore,CaptureQualityEyeScore,CaptureQualityMouthScore,CaptureQualityStabilityScore,CaptureQualityGlassesScore,CaptureQualityStorageScore,CaptureQualityFaceWidthPercent,CaptureQualityFaceHeightPercent,CaptureQualityIssues,CaptureQualitySuggestions");
         foreach (var record in records)
         {
             builder.AppendLine(string.Join(",", [
@@ -522,8 +604,8 @@ internal static class Program
                 Format(record.EyeQuality),
                 Format(record.MouthQuality),
                 Format(record.OverallQuality),
-                Format(record.HeadYaw),
                 Format(record.HeadPitch),
+                Format(record.HeadYaw),
                 Format(record.HeadRoll),
                 Csv(record.FaceReliabilityStatus),
                 record.FaceReliabilitySamples.ToString(CultureInfo.InvariantCulture),
@@ -606,6 +688,29 @@ internal static class Program
                 Format(record.FaceTop),
                 Format(record.FaceWidth),
                 Format(record.FaceHeight),
+                Format(record.ZApparentDistanceUnits),
+                Format(record.ZRelativeToReference),
+                Format(record.ZConfidencePercent),
+                Csv(record.ZEstimateKind),
+                Csv(record.ZQualityLabel),
+                Csv(record.ZDistanceSource),
+                Format(record.DistanceInches),
+                record.DistanceCalibrated.ToString(),
+                record.ZUsesCameraFov.ToString(),
+                record.ZUsesLearnedReference.ToString(),
+                record.IdentityMeasurementAvailable.ToString(),
+                record.IdentityUsableFeatureCount.ToString(CultureInfo.InvariantCulture),
+                Format(record.FaceAspectRatio),
+                Format(record.EyeMidlineXToFaceWidth),
+                Format(record.MouthCenterXToFaceWidth),
+                Format(record.EyeToMouthXOffsetToFaceWidth),
+                Format(record.InterEyeDistanceToFaceWidth),
+                Format(record.LeftEyeWidthToFaceWidth),
+                Format(record.RightEyeWidthToFaceWidth),
+                Format(record.MouthWidthToFaceWidth),
+                Format(record.EyeMidlineYToFaceHeight),
+                Format(record.MouthCenterYToFaceHeight),
+                Format(record.EyeToMouthYDistanceToFaceHeight),
                 Csv(record.EyeInsetRegion),
                 Csv(record.EyeInsetStatus),
                 record.EyeInsetHasMeasurement.ToString(),
@@ -685,9 +790,9 @@ internal static class Program
         var corpusReadinessPath = PersonalFaceCorpusReadinessStore.WriteFile(Path.Combine(outputFolder, "personal_face_corpus_readiness.json"), corpusReadiness);
         var corpusReadinessHtmlPath = PersonalFaceCorpusReadinessStore.GetHtmlPath(corpusReadinessPath);
         var previewFiles = WriteMeasurementFacePreview(outputFolder, personalModel);
-        var avatarPackageFiles = WriteMeasurementAvatarTrainingPackage(outputFolder, personalModel, motionModel, corpusReadiness);
-        var avatarCapturePlanFiles = WriteMeasurementAvatarCapturePlan(outputFolder, personalModel, motionModel, corpusReadiness);
         var collectionAudit = BuildCollectionAudit(personalModel, records);
+        var avatarPackageFiles = WriteMeasurementAvatarTrainingPackage(outputFolder, personalModel, motionModel, corpusReadiness, collectionAudit);
+        var avatarCapturePlanFiles = WriteMeasurementAvatarCapturePlan(outputFolder, personalModel, motionModel, corpusReadiness);
         var collectionAuditPath = PersonalFaceCollectionAuditStore.WriteFile(
             Path.Combine(outputFolder, PersonalFaceCollectionAuditStore.DefaultJsonFileName),
             collectionAudit);
@@ -704,6 +809,15 @@ internal static class Program
             SampleFramesPerSecond = sampleFps,
             FrameCount = records.Count,
             FaceFrames = records.Count(record => record.HasFace),
+            AxisDefinitions = new
+            {
+                X = "horizontal frame position",
+                Y = "vertical frame position",
+                Z = "apparent camera-space depth",
+                A = "rotation around X",
+                B = "rotation around Y",
+                C = "rotation around Z"
+            },
             Backends = records
                 .Select(record => record.Backend)
                 .Where(static backend => !string.IsNullOrWhiteSpace(backend))
@@ -733,6 +847,29 @@ internal static class Program
             FaceHeightMaximum = Maximum(records.Where(static record => record.HasFace).Select(record => (double?)record.FaceHeight)),
             FaceHeightAverage = Average(records.Where(static record => record.HasFace).Select(record => (double?)record.FaceHeight)),
             FaceHeightRange = Range(records.Where(static record => record.HasFace).Select(static record => record.FaceHeight)),
+            ARotationAroundXMinimum = Minimum(records.Where(static record => record.HasFace).Select(record => (double?)record.HeadPitch)),
+            ARotationAroundXMaximum = Maximum(records.Where(static record => record.HasFace).Select(record => (double?)record.HeadPitch)),
+            ARotationAroundXAverage = Average(records.Where(static record => record.HasFace).Select(record => (double?)record.HeadPitch)),
+            ARotationAroundXRange = Range(records.Where(static record => record.HasFace).Select(static record => record.HeadPitch)),
+            BRotationAroundYMinimum = Minimum(records.Where(static record => record.HasFace).Select(record => (double?)record.HeadYaw)),
+            BRotationAroundYMaximum = Maximum(records.Where(static record => record.HasFace).Select(record => (double?)record.HeadYaw)),
+            BRotationAroundYAverage = Average(records.Where(static record => record.HasFace).Select(record => (double?)record.HeadYaw)),
+            BRotationAroundYRange = Range(records.Where(static record => record.HasFace).Select(static record => record.HeadYaw)),
+            CRotationAroundZMinimum = Minimum(records.Where(static record => record.HasFace).Select(record => (double?)record.HeadRoll)),
+            CRotationAroundZMaximum = Maximum(records.Where(static record => record.HasFace).Select(record => (double?)record.HeadRoll)),
+            CRotationAroundZAverage = Average(records.Where(static record => record.HasFace).Select(record => (double?)record.HeadRoll)),
+            CRotationAroundZRange = Range(records.Where(static record => record.HasFace).Select(static record => record.HeadRoll)),
+            IdentityMeasurementFrames = records.Count(record => record.IdentityMeasurementAvailable),
+            IdentityMeasurementRate = Rate(records.Count(record => record.IdentityMeasurementAvailable), records.Count),
+            FaceAspectRatioRange = Range(records.Select(record => record.FaceAspectRatio).OfType<double>()),
+            EyeMidlineXToFaceWidthRange = Range(records.Select(record => record.EyeMidlineXToFaceWidth).OfType<double>()),
+            MouthCenterXToFaceWidthRange = Range(records.Select(record => record.MouthCenterXToFaceWidth).OfType<double>()),
+            EyeToMouthXOffsetToFaceWidthRange = Range(records.Select(record => record.EyeToMouthXOffsetToFaceWidth).OfType<double>()),
+            InterEyeDistanceToFaceWidthRange = Range(records.Select(record => record.InterEyeDistanceToFaceWidth).OfType<double>()),
+            MouthWidthToFaceWidthRange = Range(records.Select(record => record.MouthWidthToFaceWidth).OfType<double>()),
+            EyeMidlineYToFaceHeightRange = Range(records.Select(record => record.EyeMidlineYToFaceHeight).OfType<double>()),
+            MouthCenterYToFaceHeightRange = Range(records.Select(record => record.MouthCenterYToFaceHeight).OfType<double>()),
+            EyeToMouthYDistanceToFaceHeightRange = Range(records.Select(record => record.EyeToMouthYDistanceToFaceHeight).OfType<double>()),
             LandmarkEyeMeasurementRate = Rate(records.Count(record => record.AverageEyeOpening.HasValue), records.Count),
             LandmarkMouthMeasurementRate = Rate(records.Count(record => record.MouthOpening.HasValue), records.Count),
             LandmarkJawDroopMeasurementRate = Rate(records.Count(record => record.JawDroop.HasValue), records.Count),
@@ -833,6 +970,7 @@ internal static class Program
             EyeInsetMeasurementRate = Rate(records.Count(record => record.EyeInsetHasMeasurement), records.Count),
             EyeInsetAverageOpening = Average(records.Select(record => record.EyeInsetAverageOpening)),
             EyeInsetMinimumOpening = Minimum(records.Select(record => record.EyeInsetAverageOpening)),
+            EyeInsetMaximumOpening = Maximum(records.Select(record => record.EyeInsetAverageOpening)),
             EyeInsetOpeningSlopePerSecond = eyeInsetSlope,
             EyeInsetCueHasMeasurementRate = Rate(records.Count(record => record.EyeInsetCueHasMeasurement), records.Count),
             EyeInsetCueBaselineReadyRate = Rate(records.Count(record => record.EyeInsetCueBaselineReady), records.Count),
@@ -868,8 +1006,46 @@ internal static class Program
             PersonalFaceCorpusReadinessHtmlPath = corpusReadinessHtmlPath,
             PersonalFaceCorpusReadinessStatus = corpusReadiness.Status,
             PersonalFaceCorpusReadinessPercent = corpusReadiness.OverallReadinessPercent,
+            PersonalFaceCorpusDataAuditHealthPercent = corpusReadiness.DataAuditHealthPercent,
+            PersonalFaceCorpusPoseEstimationHealthPercent = corpusReadiness.PoseEstimationHealthPercent,
+            PersonalFaceCorpusFeatureAnchoringHealthPercent = corpusReadiness.FeatureAnchoringHealthPercent,
+            PersonalFaceCorpusIdentitySessionHealthPercent = corpusReadiness.IdentitySessionHealthPercent,
+            PersonalFaceCorpusIdentitySessionAuditStage = corpusReadiness.IdentitySessionAuditStage,
+            PersonalFaceCorpusIdentitySessionAuditStatus = corpusReadiness.IdentitySessionAuditStatus,
+            PersonalFaceCorpusRecentIdentityMeasurementSamples = corpusReadiness.RecentIdentityMeasurementSamples,
+            PersonalFaceCorpusAverageRecentIdentityConfidencePercent = corpusReadiness.AverageRecentIdentityConfidencePercent,
+            PersonalFaceCorpusMinimumRecentIdentityConfidencePercent = corpusReadiness.MinimumRecentIdentityConfidencePercent,
+            PersonalFaceCorpusRecentIdentityOutlierFrameRate = corpusReadiness.RecentIdentityOutlierFrameRate,
+            PersonalFaceCorpusPoseExplainedFeatureMotionHealthPercent = corpusReadiness.PoseExplainedFeatureMotionHealthPercent,
+            PersonalFaceCorpusPoseExplainedFeatureObservedRange = corpusReadiness.PoseExplainedFeatureObservedRange,
+            PersonalFaceCorpusPoseExplainedFeatureExpectedRange = corpusReadiness.PoseExplainedFeatureExpectedRange,
+            PersonalFaceCorpusEyeApertureReliabilityHealthPercent = corpusReadiness.EyeApertureReliabilityHealthPercent,
+            PersonalFaceCorpusPossibleOneEyeArtifactRate = corpusReadiness.PossibleOneEyeArtifactRate,
+            PersonalFaceCorpusEyeAgreementAveragePercent = corpusReadiness.EyeAgreementAveragePercent,
+            PersonalFaceCorpusEyeAgreementMinimumPercent = corpusReadiness.EyeAgreementMinimumPercent,
+            PersonalFaceCorpusMouthVerticalAnchorHealthPercent = corpusReadiness.MouthVerticalAnchorHealthPercent,
+            PersonalFaceCorpusMouthVerticalAnchorSamplesReviewed = corpusReadiness.MouthVerticalAnchorSamplesReviewed,
+            PersonalFaceCorpusMouthVerticalAnchorSuspiciousSampleRate = corpusReadiness.MouthVerticalAnchorSuspiciousSampleRate,
+            PersonalFaceCorpusJawDroopScaleHealthPercent = corpusReadiness.JawDroopScaleHealthPercent,
+            PersonalFaceCorpusMeasurementJournalCoveragePercent = corpusReadiness.MeasurementJournalCoveragePercent,
+            PersonalFaceCorpusDataAuditFindings = corpusReadiness.DataAuditFindings,
             PersonalFaceCorpusLearningStabilityCoveragePercent = corpusReadiness.LearningStabilityCoveragePercent,
             PersonalFaceCorpusContourShapeCoveragePercent = corpusReadiness.ContourShapeCoveragePercent,
+            PersonalFaceCorpusContourDepthProfileHealthPercent = corpusReadiness.ContourDepthProfileHealthPercent,
+            PersonalFaceCorpusSurfaceShapeCoveragePercent = corpusReadiness.SurfaceShapeCoveragePercent,
+            PersonalFaceCorpusSurfaceDepthProfileHealthPercent = corpusReadiness.SurfaceDepthProfileHealthPercent,
+            PersonalFaceCorpusZDistanceCoveragePercent = corpusReadiness.ZDistanceCoveragePercent,
+            PersonalFaceCorpusZDistanceEvidenceHealthPercent = corpusReadiness.ZDistanceEvidenceHealthPercent,
+            PersonalFaceCorpusZEstimateSamples = corpusReadiness.ZEstimateSamples,
+            PersonalFaceCorpusAverageZConfidencePercent = corpusReadiness.AverageZConfidencePercent,
+            PersonalFaceCorpusMinimumZConfidencePercent = corpusReadiness.MinimumZConfidencePercent,
+            PersonalFaceCorpusZApparentDistanceRange = corpusReadiness.ZApparentDistanceRange,
+            PersonalFaceCorpusZRelativeToReferenceRange = corpusReadiness.ZRelativeToReferenceRange,
+            PersonalFaceCorpusZApparentOnlyRate = corpusReadiness.ZApparentOnlyRate,
+            PersonalFaceCorpusARotationAroundXCoveragePercent = corpusReadiness.ARotationAroundXCoveragePercent,
+            PersonalFaceCorpusBRotationAroundYCoveragePercent = corpusReadiness.BRotationAroundYCoveragePercent,
+            PersonalFaceCorpusCRotationAroundZCoveragePercent = corpusReadiness.CRotationAroundZCoveragePercent,
+            PersonalFaceCorpusXYZABCCoveragePercent = corpusReadiness.XYZABCCoveragePercent,
             PersonalFaceCorpusEyeBehindGlassesTrustPercent = corpusReadiness.EyeBehindGlassesTrustPercent,
             PersonalFaceCorpusMouthJawTrustPercent = corpusReadiness.MouthJawTrustPercent,
             PersonalFaceCorpusDirectFeatureMeasurementTrustPercent = corpusReadiness.DirectFeatureMeasurementTrustPercent,
@@ -878,6 +1054,13 @@ internal static class Program
             PersonalFaceCorpusOuterLipShapeSamples = corpusReadiness.OuterLipShapeSamples,
             PersonalFaceCorpusInnerLipShapeSamples = corpusReadiness.InnerLipShapeSamples,
             PersonalFaceCorpusJawShapeSamples = corpusReadiness.JawShapeSamples,
+            PersonalFaceCorpusLeftBrowShapeSamples = corpusReadiness.LeftBrowShapeSamples,
+            PersonalFaceCorpusRightBrowShapeSamples = corpusReadiness.RightBrowShapeSamples,
+            PersonalFaceCorpusNoseBridgeShapeSamples = corpusReadiness.NoseBridgeShapeSamples,
+            PersonalFaceCorpusNoseBaseShapeSamples = corpusReadiness.NoseBaseShapeSamples,
+            PersonalFaceCorpusLeftCheekSurfaceSamples = corpusReadiness.LeftCheekSurfaceSamples,
+            PersonalFaceCorpusRightCheekSurfaceSamples = corpusReadiness.RightCheekSurfaceSamples,
+            PersonalFaceCorpusForeheadSurfaceSamples = corpusReadiness.ForeheadSurfaceSamples,
             PersonalFaceCorpusReadinessWarnings = corpusReadiness.Warnings,
             PersonalFaceCorpusReadinessNextCaptureSuggestions = corpusReadiness.NextCaptureSuggestions,
             PersonalFaceCollectionAuditPath = collectionAuditPath,
@@ -921,6 +1104,7 @@ internal static class Program
             PersonalModelRejectedSamples = personalModel.RejectedSamples,
             PersonalModelEventLikeRejectedSamples = personalModel.EventLikeRejectedSamples,
             PersonalModelLowQualityRejectedSamples = personalModel.LowQualityRejectedSamples,
+            PersonalModelTrackingArtifactRejectedSamples = personalModel.TrackingArtifactRejectedSamples,
             PersonalModelNoFaceRejectedSamples = personalModel.NoFaceRejectedSamples,
             PersonalModelSubjectMismatchRejectedSamples = personalModel.SubjectMismatchRejectedSamples,
             PersonalModelAcceptedRate = personalModel.AcceptedRate,
@@ -930,6 +1114,18 @@ internal static class Program
             PersonalModelIdentitySignatureSamples = personalModel.IdentitySignatureSamples,
             PersonalModelIdentityCoveragePercent = corpusReadiness.IdentityCoveragePercent,
             PersonalModelContourShapeCoveragePercent = corpusReadiness.ContourShapeCoveragePercent,
+            PersonalModelContourDepthProfileHealthPercent = corpusReadiness.ContourDepthProfileHealthPercent,
+            PersonalModelSurfaceShapeCoveragePercent = corpusReadiness.SurfaceShapeCoveragePercent,
+            PersonalModelSurfaceDepthProfileHealthPercent = corpusReadiness.SurfaceDepthProfileHealthPercent,
+            PersonalModelZDistanceCoveragePercent = corpusReadiness.ZDistanceCoveragePercent,
+            PersonalModelZDistanceEvidenceHealthPercent = corpusReadiness.ZDistanceEvidenceHealthPercent,
+            PersonalModelZEstimateSamples = personalModel.ZEstimateSamples,
+            PersonalModelZApparentDistanceRange = RangeOptional(personalModel.ZApparentDistanceUnits.Minimum, personalModel.ZApparentDistanceUnits.Maximum),
+            PersonalModelAverageZConfidencePercent = personalModel.ZConfidencePercent.Average,
+            PersonalModelARotationAroundXCoveragePercent = corpusReadiness.ARotationAroundXCoveragePercent,
+            PersonalModelBRotationAroundYCoveragePercent = corpusReadiness.BRotationAroundYCoveragePercent,
+            PersonalModelCRotationAroundZCoveragePercent = corpusReadiness.CRotationAroundZCoveragePercent,
+            PersonalModelXYZABCCoveragePercent = corpusReadiness.XYZABCCoveragePercent,
             PersonalModelEyeBehindGlassesTrustPercent = corpusReadiness.EyeBehindGlassesTrustPercent,
             PersonalModelMouthJawTrustPercent = corpusReadiness.MouthJawTrustPercent,
             PersonalModelDirectFeatureMeasurementTrustPercent = corpusReadiness.DirectFeatureMeasurementTrustPercent,
@@ -938,6 +1134,9 @@ internal static class Program
             PersonalModelMaxNextSampleInfluencePercent = personalModel.LearningStability.MaximumNextSampleInfluencePercent,
             PersonalModelMaxEventLikeNextSampleInfluencePercent = personalModel.LearningStability.MaximumEventLikeNextSampleInfluencePercent,
             PersonalModelFaceAspectAverage = personalModel.FaceAspectRatio.Average,
+            PersonalModelEyeMidlineXToFaceWidthAverage = personalModel.EyeMidlineXToFaceWidth.Average,
+            PersonalModelMouthCenterXToFaceWidthAverage = personalModel.MouthCenterXToFaceWidth.Average,
+            PersonalModelEyeToMouthXOffsetToFaceWidthAverage = personalModel.EyeToMouthXOffsetToFaceWidth.Average,
             PersonalModelInterEyeDistanceToFaceWidthAverage = personalModel.InterEyeDistanceToFaceWidth.Average,
             PersonalModelMouthWidthToFaceWidthAverage = personalModel.MouthWidthToFaceWidth.Average,
             PersonalModelAverageEyeOpening = personalModel.AverageEyeOpeningRatio.Average,
@@ -995,7 +1194,8 @@ internal static class Program
         string outputFolder,
         PersonalFaceModel personalModel,
         PersonalFaceMotionModel motionModel,
-        PersonalFaceCorpusReadiness corpusReadiness)
+        PersonalFaceCorpusReadiness corpusReadiness,
+        PersonalFaceCollectionAudit collectionAudit)
     {
         var gate = FaceReconstructionSubjectGate.FromPersonalModel(
             personalModel,
@@ -1006,7 +1206,8 @@ internal static class Program
             motionModel,
             corpusReadiness,
             gate,
-            measurementJournalBytes: 0L);
+            measurementJournalBytes: 0L,
+            collectionAudit: collectionAudit);
         return new MeasurementAvatarTrainingPackageStore().Write(outputFolder, package);
     }
 
@@ -1091,6 +1292,10 @@ internal static class Program
                 HeadYawDegrees = record.HeadYaw,
                 HeadPitchDegrees = record.HeadPitch,
                 HeadRollDegrees = record.HeadRoll,
+                ZApparentDistanceUnits = record.ZApparentDistanceUnits,
+                ZRelativeToReference = record.ZRelativeToReference,
+                ZConfidencePercent = record.ZConfidencePercent,
+                ZEstimateKind = record.ZEstimateKind,
                 AverageEyeOpeningRatio = record.AverageEyeOpening,
                 MouthOpeningRatio = record.MouthOpening,
                 JawDroopRatio = record.JawDroop,
@@ -1149,6 +1354,16 @@ internal static class Program
                 FaceCenterY = record.FaceTop + record.FaceHeight / 2d,
                 FaceWidth = record.FaceWidth,
                 FaceHeight = record.FaceHeight,
+                ZApparentDistanceUnits = record.ZApparentDistanceUnits,
+                ZRelativeToReference = record.ZRelativeToReference,
+                ZConfidencePercent = record.ZConfidencePercent,
+                DistanceInches = record.DistanceInches,
+                DistanceCalibrated = record.DistanceCalibrated,
+                ZUsesCameraFov = record.ZUsesCameraFov,
+                ZUsesLearnedReference = record.ZUsesLearnedReference,
+                ZEstimateKind = record.ZEstimateKind,
+                ZQualityLabel = record.ZQualityLabel,
+                ZDistanceSource = record.ZDistanceSource,
                 HeadYawDegrees = record.HeadYaw,
                 HeadPitchDegrees = record.HeadPitch,
                 HeadRollDegrees = record.HeadRoll,
@@ -1160,14 +1375,23 @@ internal static class Program
                 MediaPipeAverageEyeBlinkPercent = record.MediaPipeAverageEyeBlink,
                 MediaPipeJawOpenPercent = record.MediaPipeJawOpen,
                 MediaPipeMouthClosePercent = record.MediaPipeMouthClose,
-                FaceAspectRatio = null,
-                InterEyeDistanceToFaceWidth = null,
-                LeftEyeWidthToFaceWidth = null,
-                RightEyeWidthToFaceWidth = null,
-                MouthWidthToFaceWidth = null,
-                EyeMidlineYToFaceHeight = null,
-                MouthCenterYToFaceHeight = null,
-                EyeToMouthYDistanceToFaceHeight = null,
+                FaceAspectRatio = record.FaceAspectRatio,
+                EyeMidlineXToFaceWidth = record.EyeMidlineXToFaceWidth,
+                MouthCenterXToFaceWidth = record.MouthCenterXToFaceWidth,
+                EyeToMouthXOffsetToFaceWidth = record.EyeToMouthXOffsetToFaceWidth,
+                InterEyeDistanceToFaceWidth = record.InterEyeDistanceToFaceWidth,
+                LeftEyeWidthToFaceWidth = record.LeftEyeWidthToFaceWidth,
+                RightEyeWidthToFaceWidth = record.RightEyeWidthToFaceWidth,
+                MouthWidthToFaceWidth = record.MouthWidthToFaceWidth,
+                EyeMidlineYToFaceHeight = record.EyeMidlineYToFaceHeight,
+                MouthCenterYToFaceHeight = record.MouthCenterYToFaceHeight,
+                EyeToMouthYDistanceToFaceHeight = record.EyeToMouthYDistanceToFaceHeight,
+                IdentityMeasurementAvailable = record.IdentityMeasurementAvailable,
+                IdentityConfidencePercent = record.PersonalIdentityConfidence ?? 0d,
+                IdentityComparedFeatureCount = record.PersonalIdentityComparedFeatures > 0
+                    ? record.PersonalIdentityComparedFeatures
+                    : record.IdentityUsableFeatureCount,
+                IdentityOutlierFeatureCount = record.PersonalIdentityOutlierFeatures,
                 PossibleOneEyeArtifact = record.PossibleOneEyeArtifact,
                 EyeArtifactSuppressed = record.EyeArtifactSuppressed,
                 LeftEyeReconstructed = record.LeftEyeReconstructed,
@@ -1392,7 +1616,7 @@ internal static class Program
         html.AppendLine($"<div><strong>Output:</strong> <code>{H(outputFolder)}</code></div>");
         html.AppendLine($"<div><strong>Sample rate:</strong> {Display(sampleFps)} fps</div>");
         html.AppendLine($"<div><strong>Eye inset:</strong> {H(eyeInsetRegion?.Label ?? "none")}</div>");
-        html.AppendLine($"<div class=\"links\"><a href=\"{H(RelativeHref(outputFolder, csvPath))}\">CSV evidence</a> | <a href=\"{H(RelativeHref(outputFolder, summaryPath))}\">JSON summary</a> | <a href=\"{H(RelativeHref(outputFolder, personalModelPath))}\">Personal face model</a> | <a href=\"{H(RelativeHref(outputFolder, personalFaceMotionModelPath))}\">Face motion model</a> | <a href=\"{H(RelativeHref(outputFolder, personalFaceCorpusReadinessPath))}\">Corpus readiness</a> | <a href=\"{H(RelativeHref(outputFolder, personalFaceCollectionAuditPath))}\">Collection audit</a> | <a href=\"{H(RelativeHref(outputFolder, measurementFacePreviewPath))}\">Measurement face preview</a> | <a href=\"{H(RelativeHref(outputFolder, measurementAvatarTrainingPackagePath))}\">Avatar package</a> | <a href=\"{H(RelativeHref(outputFolder, measurementAvatarCapturePlanPath))}\">Capture plan</a></div>");
+        html.AppendLine($"<div class=\"links\"><a href=\"{H(RelativeHref(outputFolder, csvPath))}\">CSV evidence</a> | <a href=\"{H(RelativeHref(outputFolder, summaryPath))}\">JSON summary</a> | <a href=\"{H(RelativeHref(outputFolder, personalModelPath))}\">Personal face model</a> | <a href=\"{H(RelativeHref(outputFolder, personalFaceMotionModelPath))}\">Face motion model</a> | <a href=\"{H(RelativeHref(outputFolder, personalFaceCorpusReadinessPath))}\">Learning-data health</a> | <a href=\"{H(RelativeHref(outputFolder, personalFaceCollectionAuditPath))}\">Collection audit</a> | <a href=\"{H(RelativeHref(outputFolder, measurementFacePreviewPath))}\">Measurement face preview</a> | <a href=\"{H(RelativeHref(outputFolder, measurementAvatarTrainingPackagePath))}\">Avatar package</a> | <a href=\"{H(RelativeHref(outputFolder, measurementAvatarCapturePlanPath))}\">Capture plan</a></div>");
         html.AppendLine("</div>");
 
         html.AppendLine("<h2>Evidence Summary</h2>");
@@ -1434,6 +1658,16 @@ internal static class Program
             "Capture Quality",
             $"{Display(Average(records.Select(static record => (double?)record.CaptureQualityScore)), "0.#")}%",
             $"avatar-grade {DisplayRate(Rate(records.Count(static record => record.CaptureQualityAvatarGrade), records.Count))}; can collect {DisplayRate(Rate(records.Count(static record => record.CaptureQualityCanCollect), records.Count))}");
+        var horizontalDrift = Maximum([
+            Range(records.Select(static record => record.EyeMidlineXToFaceWidth).OfType<double>()),
+            Range(records.Select(static record => record.MouthCenterXToFaceWidth).OfType<double>()),
+            Range(records.Select(static record => record.EyeToMouthXOffsetToFaceWidth).OfType<double>())
+        ]);
+        AppendMetricCard(
+            html,
+            "Feature Anchors",
+            $"X drift {Display(horizontalDrift)}",
+            $"identity frames {DisplayRate(Rate(records.Count(static record => record.IdentityMeasurementAvailable), records.Count))}; eye X {Display(Range(records.Select(static record => record.EyeMidlineXToFaceWidth).OfType<double>()))}; mouth X {Display(Range(records.Select(static record => record.MouthCenterXToFaceWidth).OfType<double>()))}");
         AppendMetricCard(html, "Eye Inset", DisplayRate(Rate(records.Count(static record => record.EyeInsetHasMeasurement), records.Count)), $"slope {Display(eyeInsetSlope)}; paired {DisplayRate(eyeInsetAgreement.PairedRate)}");
         if (eyeInsetRegion is not null)
         {
@@ -1484,7 +1718,7 @@ internal static class Program
         }
 
         html.AppendLine("<h2>Frame Table</h2>");
-        html.AppendLine("<table><thead><tr><th>Reason</th><th>Time</th><th>Frame</th><th>Face</th><th>Eye</th><th>Mouth</th><th>Jaw</th><th>MediaPipe Correction</th><th>Quality</th><th>Capture Quality</th><th>Reliability</th><th>Cue</th><th>Status</th></tr></thead><tbody>");
+        html.AppendLine("<table><thead><tr><th>Reason</th><th>Time</th><th>Frame</th><th>Face</th><th>XYZABC</th><th>Eye</th><th>Mouth</th><th>Jaw</th><th>MediaPipe Correction</th><th>Quality</th><th>Capture Quality</th><th>Reliability</th><th>Cue</th><th>Status</th></tr></thead><tbody>");
         foreach (var reviewFrame in reviewFrames)
         {
             var record = reviewFrame.Record;
@@ -1493,6 +1727,7 @@ internal static class Program
                 + $"<td>{Display(record.TimestampSeconds)}s</td>"
                 + $"<td>{record.FrameIndex}</td>"
                 + $"<td>{H(record.HasFace ? "yes" : "no")}</td>"
+                + $"<td>A {Display(record.HeadPitch, "0.#")} deg<br>B {Display(record.HeadYaw, "0.#")} deg<br>C {Display(record.HeadRoll, "0.#")} deg<br><span class=\"subtle\">Z scale {Display(FaceScale(record))}</span></td>"
                 + $"<td>{Display(record.AverageEyeOpening)}<br><span class=\"subtle\">raw {Display(record.RawAverageEyeOpening)}</span></td>"
                 + $"<td>{Display(record.MouthOpening)}<br><span class=\"subtle\">raw {Display(record.RawMouthOpening)}</span></td>"
                 + $"<td>{Display(record.JawDroop)}</td>"
@@ -1529,6 +1764,14 @@ internal static class Program
         AddBestReviewFrame(selected, "Strongest composite cue", records, static record => record.CueScore, lowest: false);
         AddBestReviewFrame(selected, "Strongest eye-inset closure", records, static record => record.EyeInsetCueClosure, lowest: false);
         AddBestReviewFrame(selected, "Lowest measurement quality", records, static record => record.OverallQuality, lowest: true);
+        AddBestReviewFrame(selected, "Lowest A rotation around X", records, static record => record.HasFace ? record.HeadPitch : null, lowest: true);
+        AddBestReviewFrame(selected, "Highest A rotation around X", records, static record => record.HasFace ? record.HeadPitch : null, lowest: false);
+        AddBestReviewFrame(selected, "Lowest B rotation around Y", records, static record => record.HasFace ? record.HeadYaw : null, lowest: true);
+        AddBestReviewFrame(selected, "Highest B rotation around Y", records, static record => record.HasFace ? record.HeadYaw : null, lowest: false);
+        AddBestReviewFrame(selected, "Lowest C rotation around Z", records, static record => record.HasFace ? record.HeadRoll : null, lowest: true);
+        AddBestReviewFrame(selected, "Highest C rotation around Z", records, static record => record.HasFace ? record.HeadRoll : null, lowest: false);
+        AddBestReviewFrame(selected, "Farthest Z/apparent scale", records, FaceScale, lowest: true);
+        AddBestReviewFrame(selected, "Closest Z/apparent scale", records, FaceScale, lowest: false);
         return selected;
     }
 
@@ -1556,8 +1799,10 @@ internal static class Program
 
     private static void AddReviewFrame(List<ReviewFrame> selected, string label, VisionFrameRecord record)
     {
-        if (selected.Any(existing => existing.Record.FrameIndex == record.FrameIndex))
+        var existing = selected.FirstOrDefault(existing => existing.Record.FrameIndex == record.FrameIndex);
+        if (existing is not null)
         {
+            existing.Label += "; " + label;
             return;
         }
 
@@ -1601,6 +1846,12 @@ internal static class Program
             + $"capture {H(record.CaptureQualityLabel)} {H(Display(record.CaptureQualityScore, "0.#"))}%; "
             + $"reliability {H(Display(record.FaceReliability, "0.#"))}%; "
             + $"cue {H(Display(record.CueScore, "0.#"))}%"
+            + "</p>");
+        html.AppendLine("<p class=\"subtle\">"
+            + $"XYZABC: A {H(Display(record.HeadPitch, "0.#"))} deg around X; "
+            + $"B {H(Display(record.HeadYaw, "0.#"))} deg around Y; "
+            + $"C {H(Display(record.HeadRoll, "0.#"))} deg around Z; "
+            + $"Z apparent scale {H(Display(FaceScale(record)))}"
             + "</p>");
         if (!string.IsNullOrWhiteSpace(record.CaptureQualityReason))
         {
@@ -1654,6 +1905,11 @@ internal static class Program
         return first is double left && second is double right
             ? Math.Abs(left - right)
             : null;
+    }
+
+    private static double? FaceScale(VisionFrameRecord record)
+    {
+        return record.HasFace ? record.FaceWidth * record.FaceHeight : null;
     }
 
     private static string DisplayRate(double value)
@@ -1966,6 +2222,29 @@ internal static class Program
         double FaceTop,
         double FaceWidth,
         double FaceHeight,
+        double? ZApparentDistanceUnits,
+        double? ZRelativeToReference,
+        double? ZConfidencePercent,
+        string ZEstimateKind,
+        string ZQualityLabel,
+        string ZDistanceSource,
+        double? DistanceInches,
+        bool DistanceCalibrated,
+        bool ZUsesCameraFov,
+        bool ZUsesLearnedReference,
+        bool IdentityMeasurementAvailable,
+        int IdentityUsableFeatureCount,
+        double? FaceAspectRatio,
+        double? EyeMidlineXToFaceWidth,
+        double? MouthCenterXToFaceWidth,
+        double? EyeToMouthXOffsetToFaceWidth,
+        double? InterEyeDistanceToFaceWidth,
+        double? LeftEyeWidthToFaceWidth,
+        double? RightEyeWidthToFaceWidth,
+        double? MouthWidthToFaceWidth,
+        double? EyeMidlineYToFaceHeight,
+        double? MouthCenterYToFaceHeight,
+        double? EyeToMouthYDistanceToFaceHeight,
         string EyeInsetRegion,
         string EyeInsetStatus,
         bool EyeInsetHasMeasurement,
@@ -2020,7 +2299,19 @@ internal static class Program
 
     private sealed record VisionEvaluationResult(
         IReadOnlyList<VisionFrameRecord> Records,
-        PersonalFaceModel PersonalModel);
+        PersonalFaceModel PersonalModel,
+        EyeInsetRegion? AppliedEyeInsetRegion);
 
-    private sealed record ReviewFrame(string Label, VisionFrameRecord Record);
+    private sealed class ReviewFrame
+    {
+        public ReviewFrame(string label, VisionFrameRecord record)
+        {
+            Label = label;
+            Record = record;
+        }
+
+        public string Label { get; set; }
+
+        public VisionFrameRecord Record { get; }
+    }
 }

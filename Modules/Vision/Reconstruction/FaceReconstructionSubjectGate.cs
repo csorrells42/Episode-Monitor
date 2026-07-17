@@ -46,8 +46,8 @@ public sealed class FaceReconstructionSubjectGate
             IdentityConfidencePercent = identityConfidencePercent,
             GateDecision = accepted ? "accepted" : "paused",
             Reason = reason ?? (accepted
-                ? "subject confirmed for reconstruction corpus"
-                : "subject not confirmed strongly enough for reconstruction corpus")
+                ? "subject confirmed for reconstruction learning data"
+                : "subject not confirmed strongly enough for reconstruction learning data")
         };
     }
 }

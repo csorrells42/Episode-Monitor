@@ -28,7 +28,19 @@ public sealed class PersonalFaceCollectionAudit
 
     public int LowQualityGateFrames { get; set; }
 
+    public int TrackingArtifactGateFrames { get; set; }
+
     public int SubjectMismatchGateFrames { get; set; }
+
+    public int TrackingAuditHoldFrames { get; set; }
+
+    public int IdentityMeasuredFrames { get; set; }
+
+    public int IdentityAutoGateReadyFrames { get; set; }
+
+    public int IdentityWarmupStrongMismatchGateReadyFrames { get; set; }
+
+    public int IdentityOutlierFrames { get; set; }
 
     public int PersonalModelAcceptedFrames { get; set; }
 
@@ -65,6 +77,12 @@ public sealed class PersonalFaceCollectionAudit
     public double? AverageCaptureQualityGlassesScorePercent { get; set; }
 
     public double? AverageCaptureQualityStorageScorePercent { get; set; }
+
+    public double? AverageIdentityConfidencePercent { get; set; }
+
+    public double? MinimumIdentityConfidencePercent { get; set; }
+
+    public int MaximumIdentityOutlierFeatureCount { get; set; }
 
     public double? MinimumFaceWidthPercent { get; set; }
 

@@ -48,6 +48,20 @@ public sealed class PersonalFaceCollectionAuditObservation
 
     public List<string> CaptureQualitySuggestions { get; set; } = [];
 
+    public bool IdentityMeasurementAvailable { get; set; }
+
+    public bool IdentityAutoGateReady { get; set; }
+
+    public bool IdentityWarmupStrongMismatchGateReady { get; set; }
+
+    public double IdentityConfidencePercent { get; set; }
+
+    public int IdentityComparedFeatureCount { get; set; }
+
+    public int IdentityOutlierFeatureCount { get; set; }
+
+    public string IdentityStatus { get; set; } = "";
+
     public static PersonalFaceCollectionAuditObservation Create(
         DateTime reviewedAtUtc,
         bool subjectConfirmed,
@@ -91,7 +105,14 @@ public sealed class PersonalFaceCollectionAuditObservation
                 .Where(static suggestion => !string.IsNullOrWhiteSpace(suggestion))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .Take(8)
-                .ToList()
+                .ToList(),
+            IdentityMeasurementAvailable = modelUpdate.IdentityAnalysis?.HasMeasurement ?? false,
+            IdentityAutoGateReady = modelUpdate.IdentityAnalysis?.AutoGateReady ?? false,
+            IdentityWarmupStrongMismatchGateReady = modelUpdate.IdentityAnalysis?.WarmupStrongMismatchGateReady ?? false,
+            IdentityConfidencePercent = modelUpdate.IdentityAnalysis?.ConfidencePercent ?? 0d,
+            IdentityComparedFeatureCount = modelUpdate.IdentityAnalysis?.ComparedFeatureCount ?? 0,
+            IdentityOutlierFeatureCount = modelUpdate.IdentityAnalysis?.OutlierFeatureCount ?? 0,
+            IdentityStatus = modelUpdate.IdentityAnalysis?.Status ?? PersonalFaceIdentityAnalysis.NotReady.Status
         };
     }
 }

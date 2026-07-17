@@ -36,11 +36,21 @@ public sealed class PersonalFaceMotionObservation
 
     public double HeadRollDegrees { get; set; }
 
+    public double? ZApparentDistanceUnits { get; set; }
+
+    public double? ZRelativeToReference { get; set; }
+
+    public double? ZConfidencePercent { get; set; }
+
+    public string ZEstimateKind { get; set; } = "";
+
     public double? AverageEyeOpeningRatio { get; set; }
 
     public double? MouthOpeningRatio { get; set; }
 
     public double? JawDroopRatio { get; set; }
+
+    public double? AverageBrowHeightRatio { get; set; }
 
     public double? MediaPipeAverageEyeBlinkPercent { get; set; }
 
@@ -63,8 +73,10 @@ public sealed class PersonalFaceMotionObservation
         FaceLandmarkMetrics metrics,
         FaceLockStabilityAnalysis stability,
         bool acceptedForPersonalModel,
-        string source)
+        string source,
+        HeadPoseEstimate? headPose = null)
     {
+        var storedHeadPose = CreateStoredHeadPose(metrics, headPose);
         return new PersonalFaceMotionObservation
         {
             SubjectId = string.IsNullOrWhiteSpace(subjectId) ? PersonalFaceSubject.DefaultSubjectId : subjectId,
@@ -79,12 +91,17 @@ public sealed class PersonalFaceMotionObservation
             FaceContinuityPercent = stability.FaceContinuityPercent,
             EyeReliabilityPercent = stability.EyeReliabilityPercent,
             MouthReliabilityPercent = stability.MouthReliabilityPercent,
-            HeadYawDegrees = metrics.HeadYawDegrees,
-            HeadPitchDegrees = metrics.HeadPitchDegrees,
-            HeadRollDegrees = metrics.HeadRollDegrees,
+            HeadYawDegrees = storedHeadPose.YawDegrees,
+            HeadPitchDegrees = storedHeadPose.PitchDegrees,
+            HeadRollDegrees = storedHeadPose.RollDegrees,
+            ZApparentDistanceUnits = headPose?.ApparentDistanceUnits,
+            ZRelativeToReference = headPose?.ZRelativeToReference,
+            ZConfidencePercent = headPose?.ZConfidencePercent,
+            ZEstimateKind = headPose?.ZEstimateKind ?? "",
             AverageEyeOpeningRatio = metrics.AverageEyeOpeningRatio,
             MouthOpeningRatio = metrics.MouthOpeningRatio,
             JawDroopRatio = metrics.JawDroopRatio,
+            AverageBrowHeightRatio = metrics.AverageBrowHeightRatio,
             MediaPipeAverageEyeBlinkPercent = metrics.MediaPipeAverageEyeBlinkPercent,
             MediaPipeJawOpenPercent = metrics.MediaPipeJawOpenPercent,
             MediaPipeMouthClosePercent = metrics.MediaPipeMouthClosePercent,
@@ -113,9 +130,14 @@ public sealed class PersonalFaceMotionObservation
             HeadYawDegrees = sample.HeadYawDegrees,
             HeadPitchDegrees = sample.HeadPitchDegrees,
             HeadRollDegrees = sample.HeadRollDegrees,
+            ZApparentDistanceUnits = sample.ZApparentDistanceUnits,
+            ZRelativeToReference = sample.ZRelativeToReference,
+            ZConfidencePercent = sample.ZConfidencePercent,
+            ZEstimateKind = sample.ZEstimateKind,
             AverageEyeOpeningRatio = sample.AverageEyeOpeningRatio,
             MouthOpeningRatio = sample.MouthOpeningRatio,
             JawDroopRatio = sample.JawDroopRatio,
+            AverageBrowHeightRatio = sample.AverageBrowHeightRatio,
             MediaPipeAverageEyeBlinkPercent = sample.MediaPipeAverageEyeBlinkPercent,
             MediaPipeJawOpenPercent = sample.MediaPipeJawOpenPercent,
             MediaPipeMouthClosePercent = sample.MediaPipeMouthClosePercent,
@@ -124,4 +146,27 @@ public sealed class PersonalFaceMotionObservation
             MouthReconstructed = sample.MouthReconstructed
         };
     }
+
+    private static StoredHeadPose CreateStoredHeadPose(FaceLandmarkMetrics metrics, HeadPoseEstimate? headPose)
+    {
+        if (headPose is { HasFace: true } pose)
+        {
+            return new StoredHeadPose(
+                CleanPoseDegrees(pose.BRotationAroundYDegrees, metrics.HeadYawDegrees),
+                CleanPoseDegrees(pose.ARotationAroundXDegrees, metrics.HeadPitchDegrees),
+                CleanPoseDegrees(pose.CRotationAroundZDegrees, metrics.HeadRollDegrees));
+        }
+
+        return new StoredHeadPose(
+            CleanPoseDegrees(metrics.HeadYawDegrees, 0d),
+            CleanPoseDegrees(metrics.HeadPitchDegrees, 0d),
+            CleanPoseDegrees(metrics.HeadRollDegrees, 0d));
+    }
+
+    private static double CleanPoseDegrees(double value, double fallback)
+    {
+        return double.IsNaN(value) || double.IsInfinity(value) ? fallback : value;
+    }
+
+    private readonly record struct StoredHeadPose(double YawDegrees, double PitchDegrees, double RollDegrees);
 }

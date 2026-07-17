@@ -11,6 +11,8 @@ public partial class App : Application
         DispatcherUnhandledException += AppDispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += CurrentDomainUnhandledException;
         base.OnStartup(e);
+        MainWindow = new MainWindow(EpisodeMonitorStartupOptions.Parse(e.Args));
+        MainWindow.Show();
     }
 
     private static void AppDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

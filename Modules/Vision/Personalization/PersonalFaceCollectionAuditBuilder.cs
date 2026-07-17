@@ -40,8 +40,16 @@ public sealed class PersonalFaceCollectionAuditBuilder
         audit.LowQualityGateFrames = observations.Count(static observation =>
             observation.PersonalModelRejectionKind.Equals(PersonalFaceModelRejectionKind.LowQuality.ToString(), StringComparison.OrdinalIgnoreCase)
             || (observation.HasFace && !observation.CaptureQualityCanCollect));
+        audit.TrackingArtifactGateFrames = observations.Count(static observation =>
+            observation.PersonalModelRejectionKind.Equals(PersonalFaceModelRejectionKind.TrackingArtifact.ToString(), StringComparison.OrdinalIgnoreCase));
         audit.SubjectMismatchGateFrames = observations.Count(static observation =>
             observation.PersonalModelRejectionKind.Equals(PersonalFaceModelRejectionKind.SubjectMismatch.ToString(), StringComparison.OrdinalIgnoreCase));
+        audit.TrackingAuditHoldFrames = observations.Count(static observation =>
+            observation.PersonalModelRejectionKind.Equals(PersonalFaceModelRejectionKind.TrackingAuditHold.ToString(), StringComparison.OrdinalIgnoreCase));
+        audit.IdentityMeasuredFrames = observations.Count(static observation => observation.IdentityMeasurementAvailable);
+        audit.IdentityAutoGateReadyFrames = observations.Count(static observation => observation.IdentityAutoGateReady);
+        audit.IdentityWarmupStrongMismatchGateReadyFrames = observations.Count(static observation => observation.IdentityWarmupStrongMismatchGateReady);
+        audit.IdentityOutlierFrames = observations.Count(static observation => observation.IdentityOutlierFeatureCount > 0);
         audit.PersonalModelAcceptedFrames = observations.Count(static observation => observation.PersonalModelAccepted);
         audit.PersonalModelRejectedFrames = Math.Max(0, observations.Count - audit.PersonalModelAcceptedFrames);
         audit.CaptureQualityCanCollectFrames = observations.Count(static observation => observation.CaptureQualityCanCollect);
@@ -62,6 +70,15 @@ public sealed class PersonalFaceCollectionAuditBuilder
         audit.AverageCaptureQualityStabilityScorePercent = AverageOptional(observations.Select(static observation => (double?)observation.CaptureQualityStabilityScorePercent));
         audit.AverageCaptureQualityGlassesScorePercent = AverageOptional(observations.Select(static observation => (double?)observation.CaptureQualityGlassesScorePercent));
         audit.AverageCaptureQualityStorageScorePercent = AverageOptional(observations.Select(static observation => (double?)observation.CaptureQualityStorageScorePercent));
+        audit.AverageIdentityConfidencePercent = AverageOptional(observations
+            .Where(static observation => observation.IdentityMeasurementAvailable && observation.IdentityComparedFeatureCount > 0)
+            .Select(static observation => (double?)observation.IdentityConfidencePercent));
+        audit.MinimumIdentityConfidencePercent = MinimumOptional(observations
+            .Where(static observation => observation.IdentityMeasurementAvailable && observation.IdentityComparedFeatureCount > 0)
+            .Select(static observation => (double?)observation.IdentityConfidencePercent));
+        audit.MaximumIdentityOutlierFeatureCount = observations.Count == 0
+            ? 0
+            : observations.Max(static observation => observation.IdentityOutlierFeatureCount);
         audit.MinimumFaceWidthPercent = MinimumOptional(observations.Select(static observation => observation.CaptureQualityFaceWidthPercent));
         audit.MaximumFaceWidthPercent = MaximumOptional(observations.Select(static observation => observation.CaptureQualityFaceWidthPercent));
         audit.MinimumFaceHeightPercent = MinimumOptional(observations.Select(static observation => observation.CaptureQualityFaceHeightPercent));
@@ -92,7 +109,7 @@ public sealed class PersonalFaceCollectionAuditBuilder
 
         if (audit.SubjectConfirmedRate < 0.80d)
         {
-            audit.NextActions.Add("Use the subject confirmation checkbox only when Chris is in front of the camera so the measurement corpus does not mix people.");
+            audit.NextActions.Add("Use the subject confirmation checkbox only when Chris is in front of the camera so the measurement data does not mix people.");
         }
 
         if (audit.FaceDetectionRate < 0.85d)
@@ -108,6 +125,26 @@ public sealed class PersonalFaceCollectionAuditBuilder
         if (audit.CaptureQualityAvatarGradeRate < 0.30d)
         {
             audit.NextActions.Add("Collect a short avatar-grade pass with stable lighting, full face visible, clear eyes behind glasses, and mouth contours unobstructed.");
+        }
+
+        if (audit.SubjectMismatchGateFrames > 0)
+        {
+            audit.NextActions.Add("Review subject mismatch frames before continuing avatar learning; leave collection off when someone else is at the camera.");
+        }
+
+        if (audit.TrackingArtifactGateFrames > 0)
+        {
+            audit.NextActions.Add("Tracking artifacts were rejected from avatar learning; reduce glasses glare and keep hands away from eyes, lips, and jaw during intentional collection.");
+        }
+
+        if (audit.TrackingAuditHoldFrames > 0)
+        {
+            audit.NextActions.Add("Avatar learning is paused by the tracking audit; review the overlay and Face Preview for features sliding on the head before collecting more measurements.");
+        }
+
+        if (audit.IdentityMeasuredFrames > 0 && audit.AverageIdentityConfidencePercent is < 45d)
+        {
+            audit.NextActions.Add("Identity confidence is low; collect a stable Chris-only session with the full face visible before trusting long-term avatar learning.");
         }
 
         if (audit.AverageCaptureQualityCameraModeScorePercent is < 60d)

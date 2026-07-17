@@ -7,6 +7,13 @@ namespace EpisodeMonitor.Modules.Vision.OpenCv;
 
 public static class EyeInsetApertureAnalyzer
 {
+    private const double MaximumPlausibleOpeningRatio = 0.95d;
+    private const double MaximumRetainedOpeningRatio = 1.05d;
+    private const double MinimumAutoCandidateScore = 45d;
+    private const double MinimumAutoCandidateSharpnessPercent = 55d;
+    private const double MinimumAutoCandidateContrastPercent = 70d;
+    private const double MinimumAutoCandidateConfidence = 0.20d;
+
     public static EyeInsetRegion BottomRightDefaultRegion { get; } = new("bottom-right", 0.62d, 0.56d, 0.36d, 0.40d);
 
     public static EyeInsetRegion AutoSearchRegion { get; } = new("auto", 0d, 0d, 0d, 0d);
@@ -31,7 +38,7 @@ public static class EyeInsetApertureAnalyzer
             }
         }
 
-        return bestScore > 0d ? bestRegion : null;
+        return bestScore >= MinimumAutoCandidateScore ? bestRegion : null;
     }
 
     public static EyeInsetRegion? SelectBestRegion(IEnumerable<Mat> frames)
@@ -77,7 +84,7 @@ public static class EyeInsetApertureAnalyzer
             }
         }
 
-        return bestScore > 0d ? bestRegion : null;
+        return bestScore >= MinimumAutoCandidateScore ? bestRegion : null;
     }
 
     public static EyeInsetApertureAnalysis AnalyzeBest(Mat frame)
@@ -127,13 +134,13 @@ public static class EyeInsetApertureAnalyzer
         var leftRatio = CalculateOpeningRatio(left);
         var rightRatio = CalculateOpeningRatio(right);
         var averageRatio = Average(leftRatio, rightRatio);
-        var confidence = CalculateConfidence(left, right);
+        var confidence = CalculateConfidence(left, right, leftRatio, rightRatio);
         var imageQualityAvailable = HasImageDiagnostics(left) || HasImageDiagnostics(right);
         var glarePercent = AverageDiagnostic(left, right, static estimate => estimate.GlareRatio * 100d);
         var contrastPercent = AverageDiagnostic(left, right, static estimate => estimate.ContrastScore * 100d);
         var sharpnessPercent = AverageDiagnostic(left, right, static estimate => estimate.SharpnessScore * 100d);
         var darkCoveragePercent = AverageDiagnostic(left, right, static estimate => estimate.DarkCoverageRatio * 100d);
-        var measuredEyes = (left.HasAperture ? 1 : 0) + (right.HasAperture ? 1 : 0);
+        var measuredEyes = (leftRatio.HasValue ? 1 : 0) + (rightRatio.HasValue ? 1 : 0);
         var status = measuredEyes switch
         {
             2 => $"eye inset lock {confidence * 100d:0}%",
@@ -195,7 +202,7 @@ public static class EyeInsetApertureAnalyzer
 
         if (estimate.AverageOpeningRatio is double averageOpeningRatio)
         {
-            return Math.Clamp(averageOpeningRatio, 0d, 2d);
+            return NormalizeOpeningRatio(averageOpeningRatio);
         }
 
         if (estimate.ApertureBox.Width <= 0 || estimate.ApertureBox.Height <= 0)
@@ -203,7 +210,22 @@ public static class EyeInsetApertureAnalyzer
             return null;
         }
 
-        return Math.Clamp(estimate.ApertureBox.Height / (double)estimate.ApertureBox.Width, 0d, 2d);
+        return NormalizeOpeningRatio(estimate.ApertureBox.Height / (double)estimate.ApertureBox.Width);
+    }
+
+    private static double? NormalizeOpeningRatio(double openingRatio)
+    {
+        if (double.IsNaN(openingRatio) || double.IsInfinity(openingRatio) || openingRatio < 0d)
+        {
+            return null;
+        }
+
+        if (openingRatio > MaximumRetainedOpeningRatio)
+        {
+            return null;
+        }
+
+        return Math.Clamp(openingRatio, 0d, MaximumPlausibleOpeningRatio);
     }
 
     private static double? Average(double? first, double? second)
@@ -216,19 +238,46 @@ public static class EyeInsetApertureAnalyzer
         return first ?? second;
     }
 
-    private static double CalculateConfidence(ApertureEstimate left, ApertureEstimate right)
+    private static double CalculateConfidence(
+        ApertureEstimate left,
+        ApertureEstimate right,
+        double? leftOpeningRatio,
+        double? rightOpeningRatio)
     {
-        if (left.HasAperture && right.HasAperture)
+        var leftUsable = left.HasAperture && leftOpeningRatio.HasValue;
+        var rightUsable = right.HasAperture && rightOpeningRatio.HasValue;
+        if (leftUsable && rightUsable)
         {
-            return Math.Clamp((left.Confidence + right.Confidence) / 2d, 0d, 1d);
+            return Math.Clamp((left.Confidence + right.Confidence) / 2d, 0d, 1d)
+                * OpeningPlausibilityMultiplier(leftOpeningRatio, rightOpeningRatio);
         }
 
-        if (left.HasAperture || right.HasAperture)
+        if (leftUsable || rightUsable)
         {
-            return Math.Clamp(Math.Max(left.Confidence, right.Confidence) * 0.55d, 0d, 1d);
+            return Math.Clamp(Math.Max(left.Confidence, right.Confidence) * 0.55d, 0d, 1d)
+                * OpeningPlausibilityMultiplier(leftOpeningRatio, rightOpeningRatio);
         }
 
         return 0d;
+    }
+
+    private static double OpeningPlausibilityMultiplier(double? leftOpeningRatio, double? rightOpeningRatio)
+    {
+        var ratios = new[] { leftOpeningRatio, rightOpeningRatio }
+            .OfType<double>()
+            .ToList();
+        if (ratios.Count == 0)
+        {
+            return 0d;
+        }
+
+        var largest = ratios.Max();
+        if (largest <= 0.75d)
+        {
+            return 1d;
+        }
+
+        return Math.Clamp(1d - (largest - 0.75d) / (MaximumPlausibleOpeningRatio - 0.75d) * 0.35d, 0.55d, 1d);
     }
 
     private static bool HasImageDiagnostics(ApertureEstimate estimate)
@@ -287,6 +336,13 @@ public static class EyeInsetApertureAnalyzer
     private static double ScoreAutoCandidate(EyeInsetApertureAnalysis analysis)
     {
         if (!analysis.HasMeasurement)
+        {
+            return 0d;
+        }
+
+        if (analysis.MeasurementConfidence < MinimumAutoCandidateConfidence
+            || analysis.ContrastPercent < MinimumAutoCandidateContrastPercent
+            || analysis.SharpnessPercent < MinimumAutoCandidateSharpnessPercent)
         {
             return 0d;
         }

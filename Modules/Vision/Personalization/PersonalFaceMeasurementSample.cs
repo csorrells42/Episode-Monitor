@@ -78,6 +78,26 @@ public sealed class PersonalFaceMeasurementSample
 
     public double? FaceHeight { get; set; }
 
+    public double? ZApparentDistanceUnits { get; set; }
+
+    public double? ZRelativeToReference { get; set; }
+
+    public double? ZConfidencePercent { get; set; }
+
+    public double? DistanceInches { get; set; }
+
+    public bool DistanceCalibrated { get; set; }
+
+    public bool ZUsesCameraFov { get; set; }
+
+    public bool ZUsesLearnedReference { get; set; }
+
+    public string ZEstimateKind { get; set; } = "";
+
+    public string ZQualityLabel { get; set; } = "";
+
+    public string ZDistanceSource { get; set; } = "";
+
     public double HeadYawDegrees { get; set; }
 
     public double HeadPitchDegrees { get; set; }
@@ -96,6 +116,14 @@ public sealed class PersonalFaceMeasurementSample
 
     public double? JawDroopRatio { get; set; }
 
+    public double? LeftBrowHeightRatio { get; set; }
+
+    public double? RightBrowHeightRatio { get; set; }
+
+    public double? AverageBrowHeightRatio { get; set; }
+
+    public double? BrowAsymmetryPercent { get; set; }
+
     public double? MediaPipeAverageEyeBlinkPercent { get; set; }
 
     public double? MediaPipeJawOpenPercent { get; set; }
@@ -103,6 +131,12 @@ public sealed class PersonalFaceMeasurementSample
     public double? MediaPipeMouthClosePercent { get; set; }
 
     public double? FaceAspectRatio { get; set; }
+
+    public double? EyeMidlineXToFaceWidth { get; set; }
+
+    public double? MouthCenterXToFaceWidth { get; set; }
+
+    public double? EyeToMouthXOffsetToFaceWidth { get; set; }
 
     public double? InterEyeDistanceToFaceWidth { get; set; }
 
@@ -117,6 +151,18 @@ public sealed class PersonalFaceMeasurementSample
     public double? MouthCenterYToFaceHeight { get; set; }
 
     public double? EyeToMouthYDistanceToFaceHeight { get; set; }
+
+    public bool IdentityMeasurementAvailable { get; set; }
+
+    public bool IdentityAutoGateReady { get; set; }
+
+    public bool IdentityWarmupStrongMismatchGateReady { get; set; }
+
+    public double IdentityConfidencePercent { get; set; }
+
+    public int IdentityComparedFeatureCount { get; set; }
+
+    public int IdentityOutlierFeatureCount { get; set; }
 
     public bool PossibleOneEyeArtifact { get; set; }
 
@@ -137,12 +183,14 @@ public sealed class PersonalFaceMeasurementSample
         FaceLandmarkFrame frame,
         FaceLandmarkMetrics metrics,
         FaceLockStabilityAnalysis stability,
-        PersonalFaceCaptureQualityAssessment captureQuality)
+        PersonalFaceCaptureQualityAssessment captureQuality,
+        HeadPoseEstimate? headPose = null)
     {
         ArgumentNullException.ThrowIfNull(captureQuality);
 
         var bounds = GetFaceBounds(frame);
         var identity = PersonalFaceIdentityMeasurement.FromFrame(frame);
+        var storedHeadPose = CreateStoredHeadPose(metrics, headPose);
         return new PersonalFaceMeasurementSample
         {
             SubjectId = update.Model.SubjectId,
@@ -190,11 +238,21 @@ public sealed class PersonalFaceMeasurementSample
             FaceCenterY = bounds is Rect rectY ? rectY.Top + rectY.Height / 2d : null,
             FaceWidth = bounds?.Width,
             FaceHeight = bounds?.Height,
-            HeadYawDegrees = metrics.HeadYawDegrees,
-            HeadPitchDegrees = metrics.HeadPitchDegrees,
-            HeadRollDegrees = metrics.HeadRollDegrees,
+            ZApparentDistanceUnits = headPose?.ApparentDistanceUnits,
+            ZRelativeToReference = headPose?.ZRelativeToReference,
+            ZConfidencePercent = headPose?.ZConfidencePercent,
+            DistanceInches = headPose?.DistanceInches,
+            DistanceCalibrated = headPose?.DistanceCalibrated == true,
+            ZUsesCameraFov = headPose?.ZUsesCameraFov == true,
+            ZUsesLearnedReference = headPose?.ZUsesLearnedReference == true,
+            ZEstimateKind = headPose?.ZEstimateKind ?? "",
+            ZQualityLabel = headPose?.ZQualityLabel ?? "",
+            ZDistanceSource = headPose?.DistanceSource ?? "",
+            HeadYawDegrees = storedHeadPose.YawDegrees,
+            HeadPitchDegrees = storedHeadPose.PitchDegrees,
+            HeadRollDegrees = storedHeadPose.RollDegrees,
             PoseBucketIds = PersonalFacePoseBuckets
-                .Classify(metrics.HeadYawDegrees, metrics.HeadPitchDegrees, metrics.HeadRollDegrees)
+                .Classify(storedHeadPose.YawDegrees, storedHeadPose.PitchDegrees, storedHeadPose.RollDegrees)
                 .Select(static bucket => bucket.BucketId)
                 .ToList(),
             LeftEyeOpeningRatio = metrics.LeftEyeOpeningRatio,
@@ -202,10 +260,17 @@ public sealed class PersonalFaceMeasurementSample
             AverageEyeOpeningRatio = metrics.AverageEyeOpeningRatio,
             MouthOpeningRatio = metrics.MouthOpeningRatio,
             JawDroopRatio = metrics.JawDroopRatio,
+            LeftBrowHeightRatio = metrics.LeftBrowHeightRatio,
+            RightBrowHeightRatio = metrics.RightBrowHeightRatio,
+            AverageBrowHeightRatio = metrics.AverageBrowHeightRatio,
+            BrowAsymmetryPercent = metrics.BrowAsymmetryPercent,
             MediaPipeAverageEyeBlinkPercent = metrics.MediaPipeAverageEyeBlinkPercent,
             MediaPipeJawOpenPercent = metrics.MediaPipeJawOpenPercent,
             MediaPipeMouthClosePercent = metrics.MediaPipeMouthClosePercent,
             FaceAspectRatio = identity.FaceAspectRatio,
+            EyeMidlineXToFaceWidth = identity.EyeMidlineXToFaceWidth,
+            MouthCenterXToFaceWidth = identity.MouthCenterXToFaceWidth,
+            EyeToMouthXOffsetToFaceWidth = identity.EyeToMouthXOffsetToFaceWidth,
             InterEyeDistanceToFaceWidth = identity.InterEyeDistanceToFaceWidth,
             LeftEyeWidthToFaceWidth = identity.LeftEyeWidthToFaceWidth,
             RightEyeWidthToFaceWidth = identity.RightEyeWidthToFaceWidth,
@@ -213,6 +278,12 @@ public sealed class PersonalFaceMeasurementSample
             EyeMidlineYToFaceHeight = identity.EyeMidlineYToFaceHeight,
             MouthCenterYToFaceHeight = identity.MouthCenterYToFaceHeight,
             EyeToMouthYDistanceToFaceHeight = identity.EyeToMouthYDistanceToFaceHeight,
+            IdentityMeasurementAvailable = update.IdentityAnalysis?.HasMeasurement ?? false,
+            IdentityAutoGateReady = update.IdentityAnalysis?.AutoGateReady ?? false,
+            IdentityWarmupStrongMismatchGateReady = update.IdentityAnalysis?.WarmupStrongMismatchGateReady ?? false,
+            IdentityConfidencePercent = update.IdentityAnalysis?.ConfidencePercent ?? 0d,
+            IdentityComparedFeatureCount = update.IdentityAnalysis?.ComparedFeatureCount ?? 0,
+            IdentityOutlierFeatureCount = update.IdentityAnalysis?.OutlierFeatureCount ?? 0,
             PossibleOneEyeArtifact = metrics.PossibleOneEyeArtifact,
             EyeArtifactSuppressed = metrics.EyeArtifactSuppressed,
             LeftEyeReconstructed = metrics.LeftEyeReconstructed,
@@ -238,4 +309,27 @@ public sealed class PersonalFaceMeasurementSample
             ? new Rect(left, top, right - left, bottom - top)
             : null;
     }
+
+    private static StoredHeadPose CreateStoredHeadPose(FaceLandmarkMetrics metrics, HeadPoseEstimate? headPose)
+    {
+        if (headPose is { HasFace: true } pose)
+        {
+            return new StoredHeadPose(
+                CleanPoseDegrees(pose.BRotationAroundYDegrees, metrics.HeadYawDegrees),
+                CleanPoseDegrees(pose.ARotationAroundXDegrees, metrics.HeadPitchDegrees),
+                CleanPoseDegrees(pose.CRotationAroundZDegrees, metrics.HeadRollDegrees));
+        }
+
+        return new StoredHeadPose(
+            CleanPoseDegrees(metrics.HeadYawDegrees, 0d),
+            CleanPoseDegrees(metrics.HeadPitchDegrees, 0d),
+            CleanPoseDegrees(metrics.HeadRollDegrees, 0d));
+    }
+
+    private static double CleanPoseDegrees(double value, double fallback)
+    {
+        return double.IsNaN(value) || double.IsInfinity(value) ? fallback : value;
+    }
+
+    private readonly record struct StoredHeadPose(double YawDegrees, double PitchDegrees, double RollDegrees);
 }

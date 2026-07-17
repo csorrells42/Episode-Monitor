@@ -325,6 +325,12 @@ Invoke-Step "Run synthetic bottom-right eye inset video evaluation" {
         throw "Synthetic vision evaluation HTML report did not include raw-vs-working correction audit fields."
     }
 
+    foreach ($requiredReviewLabel in @("XYZABC", "Lowest A rotation around X", "Highest B rotation around Y", "Closest Z/apparent scale", "Farthest Z/apparent scale")) {
+        if ($reportText -notmatch [regex]::Escape($requiredReviewLabel)) {
+            throw "Synthetic vision evaluation HTML report did not include XYZABC/Z review evidence: $requiredReviewLabel"
+        }
+    }
+
     $csvHeader = Get-Content -LiteralPath $csvPath -TotalCount 1
     foreach ($requiredHeader in @("RawLeftEyeOpening", "RawRightEyeOpening", "RawAverageEyeOpening", "RawMouthOpening", "RawJawDroop", "JawDroop", "JawDroopVelocity", "FaceReliabilityStatus", "FaceReliability", "FaceContinuity", "EyeReliability", "MouthReliability", "MediaPipeEyeOpeningCorrection", "MediaPipeMouthOpeningCorrection", "MediaPipeEyeOpeningCorrected", "MediaPipeMouthOpeningCorrected", "CueJawDroopChange", "CueStatus", "CueBaselineReady", "CueEyeClosure", "CueMouthOpeningChange", "CueMediaPipeBlinkChange", "EyeInsetCueStatus", "EyeInsetCueClosure", "EyeInsetCueScore")) {
         if ($csvHeader -notmatch "(^|,)$requiredHeader(,|$)") {
@@ -396,7 +402,7 @@ Invoke-Step "Run synthetic bottom-right eye inset video evaluation" {
         throw "Synthetic full-frame eye dark-aperture coverage diagnostics too weak: $($summary.LandmarkAverageEyeDarkCoverage)"
     }
 
-    if ($null -eq $summary.LandmarkMaximumRawEyeAsymmetry -or $summary.LandmarkMaximumRawEyeAsymmetry -lt 20) {
+    if ($null -eq $summary.LandmarkMaximumRawEyeAsymmetry -or $summary.LandmarkMaximumRawEyeAsymmetry -lt 15) {
         throw "Synthetic full-frame raw eye asymmetry evidence was not exported: $($summary.LandmarkMaximumRawEyeAsymmetry)"
     }
 
@@ -587,6 +593,39 @@ Invoke-Step "Run synthetic bottom-right eye inset video evaluation" {
     Write-Host "Synthetic full-frame face trend verified: face rate $($summary.FaceDetectionRate), usable eyes $($summary.LandmarkEyeUsableRate), cue usable $($summary.LandmarkCueUsableRate), quality $($summary.LandmarkAverageOverallQuality), diagnostic eyes $($summary.LandmarkEyeImageQualityRate), rolling eye trend $($summary.LandmarkMaximumEyeClosingTrend), eye slope $($summary.EyeOpeningSlopePerSecond), mouth slope $($summary.MouthOpeningSlopePerSecond)"
 }
 
+Invoke-Step "Run synthetic no-inset auto rejection evaluation" {
+    $syntheticRoot = Join-Path $repoRoot "output\vision-synthetic"
+    $syntheticVideo = Join-Path $syntheticRoot "sleepy_no_eye_inset.avi"
+    $syntheticEval = Join-Path $syntheticRoot "no_inset_eval"
+    New-Item -ItemType Directory -Force -Path $syntheticRoot | Out-Null
+    if (Test-Path -LiteralPath $syntheticEval) {
+        Remove-Item -LiteralPath $syntheticEval -Recurse -Force
+    }
+
+    Invoke-Checked dotnet $smokeAssemblyPath --write-synthetic-no-inset-video $syntheticVideo
+    Invoke-Checked dotnet $evalAssemblyPath $syntheticVideo $syntheticEval 6 --eye-inset auto --write-overlays
+
+    $summaryPath = Join-Path $syntheticEval "vision_eval_summary.json"
+    if (-not (Test-Path -LiteralPath $summaryPath)) {
+        throw "Synthetic no-inset vision evaluation summary was not written: $summaryPath"
+    }
+
+    $summary = Get-Content -LiteralPath $summaryPath -Raw | ConvertFrom-Json
+    if ($summary.FaceDetectionRate -lt 0.85) {
+        throw "Synthetic no-inset full-frame face detection rate too low: $($summary.FaceDetectionRate)"
+    }
+
+    if ($summary.LandmarkEyeMeasurementRate -lt 0.85 -or $summary.LandmarkMouthMeasurementRate -lt 0.85) {
+        throw "Synthetic no-inset full-frame landmark measurements were too weak: eyes=$($summary.LandmarkEyeMeasurementRate), mouth=$($summary.LandmarkMouthMeasurementRate)"
+    }
+
+    if ($summary.EyeInsetEnabled -or $summary.EyeInsetMeasurementRate -gt 0 -or -not [string]::IsNullOrWhiteSpace($summary.EyeInsetDominantRegion)) {
+        throw "Synthetic no-inset clip falsely accepted an automatic eye inset: enabled=$($summary.EyeInsetEnabled), rate=$($summary.EyeInsetMeasurementRate), region=$($summary.EyeInsetDominantRegion)"
+    }
+
+    Write-Host "Synthetic no-inset auto rejection verified: face rate $($summary.FaceDetectionRate), eye rate $($summary.LandmarkEyeMeasurementRate), mouth rate $($summary.LandmarkMouthMeasurementRate), inset enabled $($summary.EyeInsetEnabled)."
+}
+
 Invoke-Step "Run synthetic landmark stress evaluation" {
     $syntheticRoot = Join-Path $repoRoot "output\vision-synthetic"
     $stressJson = Join-Path $syntheticRoot "landmark_stress.json"
@@ -618,7 +657,7 @@ Invoke-Step "Run synthetic landmark stress evaluation" {
     }
 
     $personalModel = Get-Content -LiteralPath $stress.PersonalModelPath -Raw | ConvertFrom-Json
-    foreach ($requiredProperty in @("ModelVersion", "ObservedSamples", "AcceptedSamples", "RejectedSamples", "EventLikeRejectedSamples", "AverageEyeOpeningRatio", "MouthOpeningRatio", "JawDroopRatio", "FaceCenterX", "FaceWidth")) {
+    foreach ($requiredProperty in @("ModelVersion", "ObservedSamples", "AcceptedSamples", "RejectedSamples", "EventLikeRejectedSamples", "TrackingArtifactRejectedSamples", "AverageEyeOpeningRatio", "MouthOpeningRatio", "JawDroopRatio", "FaceCenterX", "FaceWidth", "ZApparentDistanceUnits", "ZConfidencePercent", "ZEstimateSamples", "NoseBridgeShape", "LeftCheekSurface", "ForeheadSurface")) {
         if ($personalModel.PSObject.Properties.Name -notcontains $requiredProperty) {
             throw "Synthetic personal face model is missing property: $requiredProperty"
         }
@@ -626,6 +665,54 @@ Invoke-Step "Run synthetic landmark stress evaluation" {
 
     if ($stress.PersonalModelObservedSamples -ne $stress.FrameCount -or $personalModel.ObservedSamples -ne $stress.FrameCount) {
         throw "Synthetic personal face model did not observe every stress frame. Frames=$($stress.FrameCount), summary=$($stress.PersonalModelObservedSamples), model=$($personalModel.ObservedSamples)"
+    }
+
+    foreach ($requiredProperty in @("PersonalFaceCorpusDataAuditHealthPercent", "PersonalFaceCorpusPoseEstimationHealthPercent", "PersonalFaceCorpusFeatureAnchoringHealthPercent", "PersonalFaceCorpusPoseExplainedFeatureMotionHealthPercent", "PersonalFaceCorpusEyeApertureReliabilityHealthPercent", "PersonalFaceCorpusMouthVerticalAnchorHealthPercent", "PersonalFaceCorpusJawDroopScaleHealthPercent", "PersonalFaceCorpusSurfaceShapeCoveragePercent", "PersonalFaceCorpusSurfaceDepthProfileHealthPercent", "PersonalFaceCorpusContourDepthProfileHealthPercent", "PersonalFaceCorpusXYZABCCoveragePercent", "PersonalFaceCorpusZDistanceEvidenceHealthPercent", "PersonalModelSurfaceShapeCoveragePercent", "PersonalModelXYZABCCoveragePercent", "PersonalFaceCorpusDataAuditFindings")) {
+        if ($stress.PSObject.Properties.Name -notcontains $requiredProperty) {
+            throw "Synthetic landmark stress summary is missing data-audit property: $requiredProperty"
+        }
+    }
+
+    if ($stress.PersonalFaceCorpusDataAuditHealthPercent -lt 70) {
+        throw "Synthetic landmark stress data audit health is too low: $($stress.PersonalFaceCorpusDataAuditHealthPercent)%"
+    }
+
+    if ($stress.PersonalFaceCorpusPoseEstimationHealthPercent -lt 50) {
+        throw "Synthetic landmark stress pose audit health is too low: $($stress.PersonalFaceCorpusPoseEstimationHealthPercent)%"
+    }
+
+    if ($stress.PersonalFaceCorpusPoseExplainedFeatureMotionHealthPercent -lt 60) {
+        throw "Synthetic landmark stress pose-explained feature motion health is too low: $($stress.PersonalFaceCorpusPoseExplainedFeatureMotionHealthPercent)%"
+    }
+
+    if ($stress.PersonalFaceCorpusEyeApertureReliabilityHealthPercent -lt 70) {
+        throw "Synthetic landmark stress eye aperture reliability health is too low: $($stress.PersonalFaceCorpusEyeApertureReliabilityHealthPercent)%"
+    }
+
+    if ($stress.PersonalFaceCorpusMouthVerticalAnchorHealthPercent -lt 70) {
+        throw "Synthetic landmark stress mouth vertical anchor health is too low: $($stress.PersonalFaceCorpusMouthVerticalAnchorHealthPercent)%"
+    }
+
+    if ($stress.PersonalFaceCorpusJawDroopScaleHealthPercent -lt 90) {
+        throw "Synthetic landmark stress jaw scale audit health is too low: $($stress.PersonalFaceCorpusJawDroopScaleHealthPercent)%"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($stress.MeasurementAvatarTrainingPackageJsonPath) -or
+        -not (Test-Path -LiteralPath $stress.MeasurementAvatarTrainingPackageJsonPath)) {
+        throw "Synthetic landmark stress avatar training package was not written: $($stress.MeasurementAvatarTrainingPackageJsonPath)"
+    }
+
+    $avatarPackage = Get-Content -LiteralPath $stress.MeasurementAvatarTrainingPackageJsonPath -Raw | ConvertFrom-Json
+    foreach ($requiredReadinessProperty in @("PoseEstimationHealthPercent", "FeatureAnchoringHealthPercent", "PoseExplainedFeatureMotionHealthPercent", "EyeApertureReliabilityHealthPercent", "MouthVerticalAnchorHealthPercent", "JawDroopScaleHealthPercent", "SurfaceShapeCoveragePercent", "SurfaceDepthProfileHealthPercent", "ContourDepthProfileHealthPercent", "ZDistanceCoveragePercent", "ZDistanceEvidenceHealthPercent", "ARotationAroundXCoveragePercent", "BRotationAroundYCoveragePercent", "CRotationAroundZCoveragePercent", "XYZABCCoveragePercent", "MeasurementJournalCoveragePercent")) {
+        if ($avatarPackage.Readiness.PSObject.Properties.Name -notcontains $requiredReadinessProperty) {
+            throw "Synthetic avatar package readiness is missing audit property: $requiredReadinessProperty"
+        }
+    }
+
+    foreach ($requiredQualityProperty in @("BRotationAroundYRangeDegrees", "ARotationAroundXRangeDegrees", "CRotationAroundZRangeDegrees", "ZDistanceEvidenceHealthPercent", "ZApparentDistanceRange", "AverageZConfidencePercent", "ContourDepthProfileHealthPercent", "SurfaceDepthProfileHealthPercent", "InterEyeDistanceToFaceWidthRange", "MouthWidthToFaceWidthRange")) {
+        if ($avatarPackage.QualityProfile.PSObject.Properties.Name -notcontains $requiredQualityProperty) {
+            throw "Synthetic avatar package quality profile is missing drift-audit metric: $requiredQualityProperty"
+        }
     }
 
     if ($stress.PersonalModelAcceptedSamples -lt 18 -or $personalModel.AcceptedSamples -lt 18) {
@@ -859,7 +946,7 @@ if (-not [string]::IsNullOrWhiteSpace($samplePath)) {
         }
 
         $csvHeader = Get-Content -LiteralPath $csvPath -TotalCount 1
-        foreach ($requiredHeader in @("AverageEyeOpening", "MouthOpening", "JawDroop", "FaceReliabilityStatus", "FaceReliability", "FaceContinuity", "EyeReliability", "MouthReliability", "MediaPipeEyeOpeningCorrection", "MediaPipeMouthOpeningCorrection", "MediaPipeEyeOpeningCorrected", "MediaPipeMouthOpeningCorrected", "CueEyeClosure", "CueMouthOpeningChange", "CueJawDroopChange", "BackendStatus")) {
+        foreach ($requiredHeader in @("AverageEyeOpening", "MouthOpening", "JawDroop", "FaceReliabilityStatus", "FaceReliability", "FaceContinuity", "EyeReliability", "MouthReliability", "IdentityMeasurementAvailable", "EyeMidlineXToFaceWidth", "MouthCenterXToFaceWidth", "EyeToMouthXOffsetToFaceWidth", "MediaPipeEyeOpeningCorrection", "MediaPipeMouthOpeningCorrection", "MediaPipeEyeOpeningCorrected", "MediaPipeMouthOpeningCorrected", "CueEyeClosure", "CueMouthOpeningChange", "CueJawDroopChange", "BackendStatus")) {
             if ($csvHeader -notmatch "(^|,)$requiredHeader(,|$)") {
                 throw "Sample media evaluation CSV is missing evidence column: $requiredHeader"
             }

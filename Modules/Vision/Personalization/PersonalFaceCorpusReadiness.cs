@@ -36,6 +36,20 @@ public sealed class PersonalFaceCorpusReadiness
 
     public int JawShapeSamples { get; set; }
 
+    public int LeftBrowShapeSamples { get; set; }
+
+    public int RightBrowShapeSamples { get; set; }
+
+    public int NoseBridgeShapeSamples { get; set; }
+
+    public int NoseBaseShapeSamples { get; set; }
+
+    public int LeftCheekSurfaceSamples { get; set; }
+
+    public int RightCheekSurfaceSamples { get; set; }
+
+    public int ForeheadSurfaceSamples { get; set; }
+
     public long MeasurementJournalBytes { get; set; }
 
     public long MeasurementBudgetBytes { get; set; } = PersonalFaceMeasurementJournal.DefaultBudgetBytes;
@@ -62,11 +76,79 @@ public sealed class PersonalFaceCorpusReadiness
 
     public double DistanceCoveragePercent { get; set; }
 
+    public double ZDistanceCoveragePercent { get; set; }
+
+    public double ZDistanceEvidenceHealthPercent { get; set; }
+
+    public int ZEstimateSamples { get; set; }
+
+    public int ZCalibratedSamples { get; set; }
+
+    public int ZCameraFovEstimatedSamples { get; set; }
+
+    public int ZLearnedReferenceSamples { get; set; }
+
+    public int ZApparentOnlySamples { get; set; }
+
+    public double? ZApparentDistanceRange { get; set; }
+
+    public double? ZRelativeToReferenceRange { get; set; }
+
+    public double? AverageZConfidencePercent { get; set; }
+
+    public double? MinimumZConfidencePercent { get; set; }
+
+    public double? ZCalibratedRate { get; set; }
+
+    public double? ZCameraFovEstimatedRate { get; set; }
+
+    public double? ZLearnedReferenceRate { get; set; }
+
+    public double? ZApparentOnlyRate { get; set; }
+
+    public double ARotationAroundXCoveragePercent { get; set; }
+
+    public double BRotationAroundYCoveragePercent { get; set; }
+
+    public double CRotationAroundZCoveragePercent { get; set; }
+
+    public double XYZABCCoveragePercent { get; set; }
+
     public double ExpressionCoveragePercent { get; set; }
 
     public double IdentityCoveragePercent { get; set; }
 
+    public double IdentitySessionHealthPercent { get; set; }
+
+    public string IdentitySessionAuditStage { get; set; } = "waiting";
+
+    public string IdentitySessionAuditStatus { get; set; } = "waiting for comparable identity measurements";
+
+    public int RecentIdentityMeasurementSamples { get; set; }
+
+    public double? AverageRecentIdentityConfidencePercent { get; set; }
+
+    public double? MinimumRecentIdentityConfidencePercent { get; set; }
+
+    public double? RecentIdentityOutlierFrameRate { get; set; }
+
     public double ContourShapeCoveragePercent { get; set; }
+
+    public double ContourDepthProfileHealthPercent { get; set; }
+
+    public double SurfaceShapeCoveragePercent { get; set; }
+
+    public double SurfaceDepthProfileHealthPercent { get; set; }
+
+    public double SurfaceGeometryHealthPercent { get; set; }
+
+    public double? SurfaceGeometryMinimumPatchHealthPercent { get; set; }
+
+    public int SurfaceGeometryPatchCount { get; set; }
+
+    public int SurfaceGeometryReviewPatchCount { get; set; }
+
+    public string SurfaceGeometryStatus { get; set; } = "surface geometry waiting for measured patches";
 
     public double EyeBehindGlassesTrustPercent { get; set; }
 
@@ -74,11 +156,47 @@ public sealed class PersonalFaceCorpusReadiness
 
     public double DirectFeatureMeasurementTrustPercent { get; set; }
 
+    public double ApertureConsistencyHealthPercent { get; set; }
+
+    public PersonalFaceApertureConsistencyReport ApertureConsistency { get; set; } = new();
+
+    public double EyeApertureReliabilityHealthPercent { get; set; }
+
+    public double? EyeAgreementAveragePercent { get; set; }
+
+    public double? EyeAgreementMinimumPercent { get; set; }
+
     public double QualityCoveragePercent { get; set; }
 
     public double CaptureQualityCoveragePercent { get; set; }
 
     public double StorageHealthPercent { get; set; }
+
+    public double DataAuditHealthPercent { get; set; }
+
+    public double PoseEstimationHealthPercent { get; set; }
+
+    public double FeatureAnchoringHealthPercent { get; set; }
+
+    public double PoseExplainedFeatureMotionHealthPercent { get; set; }
+
+    public double? PoseExplainedFeatureObservedRange { get; set; }
+
+    public double? PoseExplainedFeatureExpectedRange { get; set; }
+
+    public double MouthVerticalAnchorHealthPercent { get; set; }
+
+    public int MouthVerticalAnchorSamplesReviewed { get; set; }
+
+    public double? MouthVerticalAnchorSuspiciousSampleRate { get; set; }
+
+    public double PoseBucketConsistencyHealthPercent { get; set; }
+
+    public PersonalFacePoseBucketConsistencyReport PoseBucketConsistency { get; set; } = new();
+
+    public double JawDroopScaleHealthPercent { get; set; }
+
+    public double MeasurementJournalCoveragePercent { get; set; }
 
     public double? FaceWidthRange { get; set; }
 
@@ -102,11 +220,25 @@ public sealed class PersonalFaceCorpusReadiness
 
     public double? FaceAspectRatioRange { get; set; }
 
+    public double? EyeMidlineXToFaceWidthRange { get; set; }
+
+    public double? MouthCenterXToFaceWidthRange { get; set; }
+
+    public double? EyeToMouthXOffsetToFaceWidthRange { get; set; }
+
     public double? InterEyeDistanceToFaceWidthRange { get; set; }
 
     public double? MouthWidthToFaceWidthRange { get; set; }
 
+    public double? EyeMidlineYToFaceHeightRange { get; set; }
+
+    public double? MouthCenterYToFaceHeightRange { get; set; }
+
+    public double? EyeToMouthYDistanceToFaceHeightRange { get; set; }
+
     public double? EyeArtifactSuppressedRate { get; set; }
+
+    public double? PossibleOneEyeArtifactRate { get; set; }
 
     public double? EyeReconstructedRate { get; set; }
 
@@ -115,6 +247,8 @@ public sealed class PersonalFaceCorpusReadiness
     public double LearningAnchorPercent { get; set; }
 
     public string LearningAnchorStatus { get; set; } = "waiting";
+
+    public double MinimumTrackedDistributionWeight { get; set; }
 
     public double MaximumNextSampleInfluencePercent { get; set; }
 
@@ -147,6 +281,8 @@ public sealed class PersonalFaceCorpusReadiness
     public double? AverageCaptureQualityGlassesScorePercent { get; set; }
 
     public List<string> CaptureQualityIssueLabels { get; set; } = [];
+
+    public List<string> DataAuditFindings { get; set; } = [];
 
     public List<string> Strengths { get; set; } = [];
 

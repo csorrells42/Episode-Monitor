@@ -34,7 +34,8 @@ public sealed class PersonalFaceMeasurementJournal
         FaceLandmarkFrame frame,
         FaceLandmarkMetrics metrics,
         FaceLockStabilityAnalysis stability,
-        PersonalFaceCaptureQualityAssessment captureQuality)
+        PersonalFaceCaptureQualityAssessment captureQuality,
+        HeadPoseEstimate? headPose = null)
     {
         ArgumentNullException.ThrowIfNull(captureQuality);
 
@@ -54,7 +55,7 @@ public sealed class PersonalFaceMeasurementJournal
         var measurementsFolder = Path.Combine(personalModelFolder, MeasurementsFolderName);
         Directory.CreateDirectory(measurementsFolder);
         var path = Path.Combine(measurementsFolder, $"{capturedAtUtc:yyyy-MM-dd}.jsonl");
-        var sample = PersonalFaceMeasurementSample.Create(update, frame, metrics, stability, captureQuality);
+        var sample = PersonalFaceMeasurementSample.Create(update, frame, metrics, stability, captureQuality, headPose);
         File.AppendAllText(path, JsonSerializer.Serialize(sample, JsonOptions) + Environment.NewLine, Encoding.UTF8);
         _lastWriteAtUtc = capturedAtUtc;
         EnforceBudget(measurementsFolder, _budgetBytes);

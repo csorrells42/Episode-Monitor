@@ -164,6 +164,9 @@ public sealed class OpenCvFacemarkLandmarkTracker : IStatefulFaceLandmarkTracker
 
         var leftEye = Slice(normalizedPoints, 36, 6);
         var rightEye = Slice(normalizedPoints, 42, 6);
+        var firstBrow = Slice(normalizedPoints, 17, 5);
+        var secondBrow = Slice(normalizedPoints, 22, 5);
+        var (leftBrow, rightBrow) = SortByFramePosition(firstBrow, secondBrow);
         var outerLip = Slice(normalizedPoints, 48, 12);
         var innerLip = Slice(normalizedPoints, 60, 8);
         var jaw = Slice(normalizedPoints, 0, 17);
@@ -176,10 +179,14 @@ public sealed class OpenCvFacemarkLandmarkTracker : IStatefulFaceLandmarkTracker
             TrackingConfidence = 0.82d,
             EyeConfidence = 0.78d,
             MouthConfidence = 0.78d,
+            HeadYawDegrees = EstimateYawDegrees(normalizedPoints),
+            HeadPitchDegrees = EstimatePitchDegrees(normalizedPoints),
             HeadRollDegrees = EstimateRollDegrees(leftEye, rightEye),
             FaceContour = CreateFaceContour(normalizedPoints),
             LeftEyeContour = leftEye,
             RightEyeContour = rightEye,
+            LeftBrowContour = leftBrow,
+            RightBrowContour = rightBrow,
             OuterLipContour = outerLip,
             InnerLipContour = innerLip,
             JawContour = jaw
@@ -266,6 +273,8 @@ public sealed class OpenCvFacemarkLandmarkTracker : IStatefulFaceLandmarkTracker
             FaceContour = source.FaceContour,
             LeftEyeContour = source.LeftEyeContour,
             RightEyeContour = source.RightEyeContour,
+            LeftBrowContour = source.LeftBrowContour,
+            RightBrowContour = source.RightBrowContour,
             OuterLipContour = source.OuterLipContour,
             InnerLipContour = source.InnerLipContour,
             JawContour = source.JawContour
@@ -440,10 +449,14 @@ public sealed class OpenCvFacemarkLandmarkTracker : IStatefulFaceLandmarkTracker
             TrackingConfidence = Math.Max(frame.TrackingConfidence, faceConfidence),
             EyeConfidence = frame.EyeConfidence,
             MouthConfidence = frame.MouthConfidence,
+            HeadYawDegrees = frame.HeadYawDegrees,
+            HeadPitchDegrees = frame.HeadPitchDegrees,
             HeadRollDegrees = frame.HeadRollDegrees,
             FaceContour = frame.FaceContour,
             LeftEyeContour = frame.LeftEyeContour,
             RightEyeContour = frame.RightEyeContour,
+            LeftBrowContour = frame.LeftBrowContour,
+            RightBrowContour = frame.RightBrowContour,
             OuterLipContour = frame.OuterLipContour,
             InnerLipContour = frame.InnerLipContour,
             JawContour = frame.JawContour
@@ -504,9 +517,63 @@ public sealed class OpenCvFacemarkLandmarkTracker : IStatefulFaceLandmarkTracker
         return new WpfRect(minX, minY, maxX - minX, maxY - minY);
     }
 
+    private static double EstimateYawDegrees(IReadOnlyList<WpfPoint> points)
+    {
+        if (points.Count < 68)
+        {
+            return 0d;
+        }
+
+        var leftCheek = points[0];
+        var rightCheek = points[16];
+        var noseTip = points[30];
+        var faceCenterX = (leftCheek.X + rightCheek.X) / 2d;
+        var halfWidth = Math.Abs(rightCheek.X - leftCheek.X) / 2d;
+        if (halfWidth <= 0.001d)
+        {
+            return 0d;
+        }
+
+        return Math.Clamp((noseTip.X - faceCenterX) / halfWidth * 34d, -45d, 45d);
+    }
+
+    private static double EstimatePitchDegrees(IReadOnlyList<WpfPoint> points)
+    {
+        if (points.Count < 68)
+        {
+            return 0d;
+        }
+
+        var eyeY = (AverageY(points, 36, 6) + AverageY(points, 42, 6)) / 2d;
+        var mouthY = AverageY(points, 48, 12);
+        var noseTip = points[30];
+        var eyeToMouth = mouthY - eyeY;
+        if (eyeToMouth <= 0.001d)
+        {
+            return 0d;
+        }
+
+        var noseRatio = (noseTip.Y - eyeY) / eyeToMouth;
+        return Math.Clamp((noseRatio - 0.52d) * 50d, -35d, 35d);
+    }
+
+    private static double AverageY(IReadOnlyList<WpfPoint> points, int start, int count)
+    {
+        return points.Skip(start).Take(count).Average(static point => point.Y);
+    }
+
     private static IReadOnlyList<WpfPoint> Slice(IReadOnlyList<WpfPoint> points, int start, int count)
     {
         return points.Skip(start).Take(count).ToList();
+    }
+
+    private static (IReadOnlyList<WpfPoint> Left, IReadOnlyList<WpfPoint> Right) SortByFramePosition(
+        IReadOnlyList<WpfPoint> first,
+        IReadOnlyList<WpfPoint> second)
+    {
+        var firstCenter = first.Count == 0 ? 0d : first.Average(static point => point.X);
+        var secondCenter = second.Count == 0 ? 1d : second.Average(static point => point.X);
+        return firstCenter <= secondCenter ? (first, second) : (second, first);
     }
 
     private static IReadOnlyList<WpfPoint> CreateFaceContour(IReadOnlyList<WpfPoint> points)

@@ -42,20 +42,43 @@ public sealed class MeasurementAvatarTrainingPackageStore
             ScoreBar("Pose", package.Readiness.PoseCoveragePercent),
             ScoreBar("Pose Buckets", package.Readiness.PoseBucketCoveragePercent),
             ScoreBar("Distance", package.Readiness.DistanceCoveragePercent),
+            ScoreBar("Z Distance", package.Readiness.ZDistanceCoveragePercent),
+            ScoreBar("Z Evidence", package.Readiness.ZDistanceEvidenceHealthPercent),
+            ScoreBar("A Rotate X", package.Readiness.ARotationAroundXCoveragePercent),
+            ScoreBar("B Rotate Y", package.Readiness.BRotationAroundYCoveragePercent),
+            ScoreBar("C Rotate Z", package.Readiness.CRotationAroundZCoveragePercent),
+            ScoreBar("XYZABC", package.Readiness.XYZABCCoveragePercent),
             ScoreBar("Expression", package.Readiness.ExpressionCoveragePercent),
             ScoreBar("Identity", package.Readiness.IdentityCoveragePercent),
+            ScoreBar("Identity Session", package.Readiness.IdentitySessionHealthPercent),
             ScoreBar("Contour Shape", package.Readiness.ContourShapeCoveragePercent),
+            ScoreBar("Contour Z Profile", package.Readiness.ContourDepthProfileHealthPercent),
+            ScoreBar("Surface Shape", package.Readiness.SurfaceShapeCoveragePercent),
+            ScoreBar("Surface Z Profile", package.Readiness.SurfaceDepthProfileHealthPercent),
+            ScoreBar("Surface Geometry", package.Readiness.SurfaceGeometryHealthPercent),
             ScoreBar("Eye Glasses Trust", package.Readiness.EyeBehindGlassesTrustPercent),
             ScoreBar("Mouth Jaw Trust", package.Readiness.MouthJawTrustPercent),
             ScoreBar("Direct Feature Trust", package.Readiness.DirectFeatureMeasurementTrustPercent),
+            ScoreBar("Aperture Consistency", package.Readiness.ApertureConsistencyHealthPercent),
+            ScoreBar("Eye Aperture Reliability", package.Readiness.EyeApertureReliabilityHealthPercent),
             ScoreBar("Quality", package.Readiness.QualityCoveragePercent),
             ScoreBar("Capture Quality", package.Readiness.CaptureQualityCoveragePercent),
-            ScoreBar("Storage", package.Readiness.StorageHealthPercent)
+            ScoreBar("Storage", package.Readiness.StorageHealthPercent),
+            ScoreBar("Data Audit", package.Readiness.DataAuditHealthPercent),
+            ScoreBar("Pose Estimation", package.Readiness.PoseEstimationHealthPercent),
+            ScoreBar("Feature Anchoring", package.Readiness.FeatureAnchoringHealthPercent),
+            ScoreBar("Pose-Explained Features", package.Readiness.PoseExplainedFeatureMotionHealthPercent),
+            ScoreBar("Mouth Anchor", package.Readiness.MouthVerticalAnchorHealthPercent),
+            ScoreBar("Pose Bucket Consistency", package.Readiness.PoseBucketConsistencyHealthPercent),
+            ScoreBar("Jaw Scale", package.Readiness.JawDroopScaleHealthPercent),
+            ScoreBar("Journal Coverage", package.Readiness.MeasurementJournalCoveragePercent)
         });
         var artifacts = string.Concat(package.SourceArtifacts.Select(artifact =>
             $"<tr><th>{Escape(artifact.Name)}</th><td>{Escape(artifact.FileName)}</td><td>{Escape(artifact.Kind)}</td><td>{Escape(artifact.Description)}</td></tr>"));
         var contourShapeRows = BuildContourShapeTable(package.ContourShapeProfiles);
         var poseRows = BuildPoseBucketTable(package.PoseCoverageProfile);
+        var poseConsistencyRows = BuildPoseConsistencyTable(package.PoseBucketConsistency);
+        var apertureConsistencyRows = BuildApertureConsistencyTable(package.ApertureConsistency);
 
         return $$"""
 <!doctype html>
@@ -176,11 +199,14 @@ li { margin: 5px 0; }
         <tr><th>Accepted baseline samples</th><td>{{package.AcceptedBaselineSamples.ToString(CultureInfo.InvariantCulture)}}</td></tr>
         <tr><th>Accepted sample weight</th><td>{{Format(package.AcceptedSampleWeight)}}</td></tr>
         <tr><th>Learning anchor</th><td>{{Format(package.LearningStability.AnchorPercent)}}% ({{Escape(package.LearningStability.AnchorStatus)}})</td></tr>
+        <tr><th>Weakest tracked weight</th><td>{{Format(package.LearningStability.MinimumTrackedDistributionWeight)}}</td></tr>
         <tr><th>Max next-sample influence</th><td>{{Format(package.LearningStability.MaximumNextSampleInfluencePercent)}}%</td></tr>
         <tr><th>Max event-like influence</th><td>{{Format(package.LearningStability.MaximumEventLikeNextSampleInfluencePercent)}}%</td></tr>
         <tr><th>Motion observations</th><td>{{package.MotionUsableObservations.ToString(CultureInfo.InvariantCulture)}}</td></tr>
         <tr><th>Motion pairs</th><td>{{package.MotionPairs.ToString(CultureInfo.InvariantCulture)}}</td></tr>
         <tr><th>Identity signature samples</th><td>{{package.IdentitySignatureSamples.ToString(CultureInfo.InvariantCulture)}}</td></tr>
+        <tr><th>Identity session stage</th><td>{{Escape(package.Readiness.IdentitySessionAuditStage)}}</td></tr>
+        <tr><th>Identity session status</th><td>{{Escape(package.Readiness.IdentitySessionAuditStatus)}}</td></tr>
         <tr><th>Provenance policy</th><td>{{Escape(package.ProvenancePolicy)}}</td></tr>
         <tr><th>Template prior policy</th><td>{{Escape(package.TemplatePriorPolicy)}}</td></tr>
         <tr><th>Measurement storage</th><td>{{Escape(FormatBytes(package.MeasurementJournalBytes))}} / {{Escape(FormatBytes(package.MeasurementBudgetBytes))}} ({{Format(package.MeasurementBudgetUsedPercent)}}%)</td></tr>
@@ -216,6 +242,8 @@ li { margin: 5px 0; }
     <div class="panel">
       <h2>Pose Coverage Profile</h2>
       {{poseRows}}
+      <h3>Pose Bucket Consistency</h3>
+      {{poseConsistencyRows}}
     </div>
     <div class="panel">
       <h2>Contour Shape Profiles</h2>
@@ -223,6 +251,8 @@ li { margin: 5px 0; }
     </div>
     <div class="panel">
       <h2>Quality Profile</h2>
+      <h3>Aperture Consistency</h3>
+      {{apertureConsistencyRows}}
       {{BuildMetricTable(package.QualityProfile)}}
     </div>
   </section>
@@ -257,7 +287,7 @@ li { margin: 5px 0; }
     {
         if (profiles.Count == 0)
         {
-            return "<p class=\"subtle\">No aggregate contour shape profiles available yet.</p>";
+            return "<p class=\"subtle\">No aggregate contour or surface shape profiles available yet.</p>";
         }
 
         var rows = string.Concat(profiles.Values.Select(profile =>
@@ -273,8 +303,31 @@ li { margin: 5px 0; }
         }
 
         var rows = string.Concat(buckets.Select(bucket =>
-            $"<tr><th>{Escape(bucket.Label)}</th><td>{bucket.SampleCount.ToString(CultureInfo.InvariantCulture)}</td><td>{Format(bucket.TotalWeight)}</td><td>{Format(bucket.HeadYawDegrees.Average)}</td><td>{Format(bucket.HeadPitchDegrees.Average)}</td><td>{Format(bucket.HeadRollDegrees.Average)}</td><td>{Escape(bucket.PrimaryNeutralReference ? "neutral reference" : "pose coverage")}</td><td>{Escape(bucket.CaptureInstruction)}</td></tr>"));
-        return $"<table><tr><th>Pose</th><th>Samples</th><th>Weight</th><th>Yaw</th><th>Pitch</th><th>Roll</th><th>Use</th><th>Next capture</th></tr>{rows}</table>";
+            $"<tr><th>{Escape(bucket.Label)}</th><td>{bucket.SampleCount.ToString(CultureInfo.InvariantCulture)}</td><td>{Format(bucket.TotalWeight)}</td><td>{Format(bucket.HeadPitchDegrees.Average)}</td><td>{Format(bucket.HeadYawDegrees.Average)}</td><td>{Format(bucket.HeadRollDegrees.Average)}</td><td>{Escape(bucket.PrimaryNeutralReference ? "neutral reference" : "pose coverage")}</td><td>{Escape(bucket.CaptureInstruction)}</td></tr>"));
+        return $"<table><tr><th>Pose</th><th>Samples</th><th>Weight</th><th>A</th><th>B</th><th>C</th><th>Use</th><th>Next capture</th></tr>{rows}</table>";
+    }
+
+    private static string BuildPoseConsistencyTable(PersonalFacePoseBucketConsistencyReport report)
+    {
+        if (report.Comparisons.Count == 0)
+        {
+            return $"<p class=\"subtle\">{Escape(report.Status)}</p>";
+        }
+
+        var rows = string.Concat(report.Comparisons.Select(comparison =>
+            $"<tr><th>{Escape(comparison.Label)}</th><td>{Escape(comparison.Status)}</td><td>{Format(comparison.PoseAxisHealthPercent)}%</td><td>{Escape(comparison.PoseAxisReason)}</td><td>{Format(comparison.DriftScorePercent)}%</td><td>{Format(comparison.EyeMidlineXToFaceWidthDelta)}</td><td>{Format(comparison.MouthCenterXToFaceWidthDelta)}</td><td>{Format(comparison.EyeToMouthXOffsetToFaceWidthDelta)}</td><td>{Format(comparison.InterEyeDistanceToFaceWidthDelta)}</td><td>{Format(comparison.MouthWidthToFaceWidthDelta)}</td><td>{Format(comparison.EyeMidlineYToFaceHeightDelta)}</td><td>{Format(comparison.MouthCenterYToFaceHeightDelta)}</td></tr>"));
+        return $"<p class=\"subtle\">{Escape(report.Status)} | health {Format(report.HealthPercent)}%</p><table><tr><th>Pose</th><th>Status</th><th>Axis</th><th>Axis reason</th><th>Drift</th><th>Eye X</th><th>Mouth X</th><th>Eye-mouth X</th><th>Eye spacing</th><th>Mouth width</th><th>Eye height</th><th>Mouth height</th></tr>{rows}</table>";
+    }
+
+    private static string BuildApertureConsistencyTable(PersonalFaceApertureConsistencyReport report)
+    {
+        return "<table>"
+            + $"<tr><th>Status</th><td>{Escape(report.Status)}</td></tr>"
+            + $"<tr><th>Overall health</th><td>{Format(report.HealthPercent)}%</td></tr>"
+            + $"<tr><th>Eye aperture</th><td>{Format(report.EyeApertureHealthPercent)}% | {report.EyeComparedSampleCount.ToString(CultureInfo.InvariantCulture)} samples | blink correlation {Format(report.EyeOpeningBlinkCorrelation)}</td></tr>"
+            + $"<tr><th>Mouth aperture</th><td>{Format(report.MouthApertureHealthPercent)}% | {report.MouthComparedSampleCount.ToString(CultureInfo.InvariantCulture)} samples | mouth correlation {Format(report.MouthOpeningEvidenceCorrelation)}</td></tr>"
+            + $"<tr><th>Jaw droop</th><td>{Format(report.JawDroopAgreementHealthPercent)}% | {report.JawComparedSampleCount.ToString(CultureInfo.InvariantCulture)} samples | jaw correlation {Format(report.JawDroopEvidenceCorrelation)}</td></tr>"
+            + "</table>";
     }
 
     private static string ScoreBar(string label, double value)

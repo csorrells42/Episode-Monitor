@@ -25,7 +25,7 @@ public sealed class MeasurementFacePreviewModel
     public string RenderDecision { get; set; } = "waiting for subject-gated measurements";
 
     public string CoordinateSpace { get; set; } =
-        "Normalized centered face space. X/Y/Z are measurement-derived preview coordinates, not raw frame pixels.";
+        "Normalized centered face space. Points carry X/Y/Z positions; A/B/C orientation is represented by preview metrics and pose buckets, not duplicated on every point.";
 
     public int ObservedSamples { get; set; }
 
@@ -54,9 +54,17 @@ public sealed class MeasurementFacePreviewModel
 
     public Dictionary<string, PersonalFaceContourShapeProfile> ContourShapeProfiles { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    public List<MeasurementFacePreviewPoseBucket> PoseBuckets { get; set; } = [];
+
+    public PersonalFacePoseBucketConsistencyReport PoseBucketConsistency { get; set; } = new();
+
+    public List<MeasurementFacePreviewSurfaceEvidence> SurfaceEvidence { get; set; } = [];
+
     public List<MeasurementFacePreviewPoint> Points { get; set; } = [];
 
     public List<MeasurementFacePreviewPolyline> Polylines { get; set; } = [];
+
+    public List<MeasurementFacePreviewSurfacePatch> SurfacePatches { get; set; } = [];
 
     public List<string> Warnings { get; set; } = [];
 

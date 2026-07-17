@@ -13,8 +13,10 @@ public enum PersonalFaceModelRejectionKind
     None,
     NoFace,
     LowQuality,
+    TrackingArtifact,
     EventLike,
     SubjectNotConfirmed,
     LearningStopped,
-    SubjectMismatch
+    SubjectMismatch,
+    TrackingAuditHold
 }

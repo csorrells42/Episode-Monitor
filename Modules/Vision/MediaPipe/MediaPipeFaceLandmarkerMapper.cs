@@ -22,6 +22,16 @@ internal static class MediaPipeFaceLandmarkerMapper
         362, 398, 384, 385, 386, 387, 388, 466, 263, 249, 390, 373, 374, 380, 381, 382
     ];
 
+    private static readonly int[] BrowA =
+    [
+        70, 63, 105, 66, 107, 55, 65, 52, 53, 46
+    ];
+
+    private static readonly int[] BrowB =
+    [
+        336, 296, 334, 293, 300, 285, 295, 282, 283, 276
+    ];
+
     private static readonly int[] OuterLip =
     [
         61, 185, 40, 39, 37, 0, 267, 269, 270, 409,
@@ -69,11 +79,15 @@ internal static class MediaPipeFaceLandmarkerMapper
         var firstEye = Select(response.Landmarks, EyeA);
         var secondEye = Select(response.Landmarks, EyeB);
         var (leftEye, rightEye) = SortEyesByFramePosition(firstEye, secondEye);
+        var firstBrow = Select(response.Landmarks, BrowA);
+        var secondBrow = Select(response.Landmarks, BrowB);
+        var (leftBrow, rightBrow) = SortEyesByFramePosition(firstBrow, secondBrow);
         var outerLip = Select(response.Landmarks, OuterLip);
         var innerLip = Select(response.Landmarks, InnerLip);
         var jaw = Select(response.Landmarks, Jaw);
         var blendshapes = CreateBlendshapeDictionary(response.Blendshapes);
         var faceBox = BoundingRect(faceContour);
+        var pose = EstimatePoseDegrees(response, leftEye, rightEye);
         var frame = new FaceLandmarkFrame
         {
             HasFace = true,
@@ -82,11 +96,18 @@ internal static class MediaPipeFaceLandmarkerMapper
             TrackingConfidence = 0.94d,
             EyeConfidence = 0.90d,
             MouthConfidence = 0.90d,
-            HeadRollDegrees = EstimateRollDegrees(leftEye, rightEye),
+            HeadYawDegrees = pose.YawDegrees,
+            HeadPitchDegrees = pose.PitchDegrees,
+            HeadRollDegrees = pose.RollDegrees,
             BlendshapeScores = blendshapes,
+            DenseMeshTopology = "MediaPipeFaceMesh468",
+            DenseMeshPoints = CreateDenseMeshPoints(response.Landmarks),
+            FacialTransformationMatrix = response.FacialTransformationMatrix.ToList(),
             FaceContour = faceContour,
             LeftEyeContour = leftEye,
             RightEyeContour = rightEye,
+            LeftBrowContour = leftBrow,
+            RightBrowContour = rightBrow,
             OuterLipContour = outerLip,
             InnerLipContour = innerLip,
             JawContour = jaw
@@ -122,6 +143,24 @@ internal static class MediaPipeFaceLandmarkerMapper
         };
     }
 
+    private static IReadOnlyList<FaceMeshLandmarkPoint> CreateDenseMeshPoints(IReadOnlyList<MediaPipeSidecarLandmark> landmarks)
+    {
+        var points = new List<FaceMeshLandmarkPoint>(landmarks.Count);
+        for (var index = 0; index < landmarks.Count; index++)
+        {
+            var landmark = landmarks[index];
+            points.Add(new FaceMeshLandmarkPoint
+            {
+                Index = index,
+                X = Math.Clamp(landmark.X, 0d, 1d),
+                Y = Math.Clamp(landmark.Y, 0d, 1d),
+                Z = landmark.Z
+            });
+        }
+
+        return points;
+    }
+
     private static IReadOnlyList<Point> Select(IReadOnlyList<MediaPipeSidecarLandmark> landmarks, IReadOnlyList<int> indices)
     {
         var points = new List<Point>(indices.Count);
@@ -146,6 +185,111 @@ internal static class MediaPipeFaceLandmarkerMapper
         var firstCenter = first.Count == 0 ? 0d : first.Average(static point => point.X);
         var secondCenter = second.Count == 0 ? 1d : second.Average(static point => point.X);
         return firstCenter <= secondCenter ? (first, second) : (second, first);
+    }
+
+    private static (double YawDegrees, double PitchDegrees, double RollDegrees) EstimatePoseDegrees(
+        MediaPipeSidecarResponse response,
+        IReadOnlyList<Point> leftEye,
+        IReadOnlyList<Point> rightEye)
+    {
+        var fallbackRoll = EstimateRollDegrees(leftEye, rightEye);
+        if (TryEstimatePoseFromMatrix(response.FacialTransformationMatrix, out var matrixPose))
+        {
+            return matrixPose;
+        }
+
+        return (
+            EstimateYawDegrees(response.Landmarks),
+            EstimatePitchDegrees(response.Landmarks),
+            fallbackRoll);
+    }
+
+    private static bool TryEstimatePoseFromMatrix(
+        IReadOnlyList<double> values,
+        out (double YawDegrees, double PitchDegrees, double RollDegrees) pose)
+    {
+        pose = default;
+        if (values.Count < 16 || values.Any(static value => double.IsNaN(value) || double.IsInfinity(value)))
+        {
+            return false;
+        }
+
+        // MediaPipe supplies a 4x4 facial transformation matrix. Treat it as row-major here;
+        // if a runtime omits or changes it, the landmark fallback below keeps pose populated.
+        var r02 = values[2];
+        var r10 = values[4];
+        var r11 = values[5];
+        var r12 = values[6];
+        var r22 = values[10];
+        var yaw = Math.Atan2(r02, r22) * 180d / Math.PI;
+        var pitch = Math.Asin(Math.Clamp(-r12, -1d, 1d)) * 180d / Math.PI;
+        var roll = Math.Atan2(r10, r11) * 180d / Math.PI;
+        if (Math.Abs(yaw) > 80d || Math.Abs(pitch) > 70d || Math.Abs(roll) > 80d)
+        {
+            return false;
+        }
+
+        pose = (
+            Math.Clamp(yaw, -55d, 55d),
+            Math.Clamp(pitch, -45d, 45d),
+            Math.Clamp(roll, -55d, 55d));
+        return true;
+    }
+
+    private static double EstimateYawDegrees(IReadOnlyList<MediaPipeSidecarLandmark> landmarks)
+    {
+        if (!TryLandmark(landmarks, 1, out var noseTip)
+            || !TryLandmark(landmarks, 234, out var leftCheek)
+            || !TryLandmark(landmarks, 454, out var rightCheek))
+        {
+            return 0d;
+        }
+
+        var faceCenterX = (leftCheek.X + rightCheek.X) / 2d;
+        var halfWidth = Math.Abs(rightCheek.X - leftCheek.X) / 2d;
+        if (halfWidth <= 0.001d)
+        {
+            return 0d;
+        }
+
+        var lateralOffset = (noseTip.X - faceCenterX) / halfWidth;
+        var depthAsymmetry = (rightCheek.Z - leftCheek.Z) / Math.Max(0.02d, halfWidth);
+        return Math.Clamp((lateralOffset * 24d) + (depthAsymmetry * 10d), -45d, 45d);
+    }
+
+    private static double EstimatePitchDegrees(IReadOnlyList<MediaPipeSidecarLandmark> landmarks)
+    {
+        if (!TryLandmark(landmarks, 1, out var noseTip)
+            || !TryLandmark(landmarks, 10, out var forehead)
+            || !TryLandmark(landmarks, 152, out var chin))
+        {
+            return 0d;
+        }
+
+        var faceHeight = chin.Y - forehead.Y;
+        if (faceHeight <= 0.001d)
+        {
+            return 0d;
+        }
+
+        var noseRatio = (noseTip.Y - forehead.Y) / faceHeight;
+        var depthOffset = (noseTip.Z - ((forehead.Z + chin.Z) / 2d)) / Math.Max(0.02d, faceHeight);
+        return Math.Clamp((noseRatio - 0.47d) * 85d - depthOffset * 8d, -35d, 35d);
+    }
+
+    private static bool TryLandmark(
+        IReadOnlyList<MediaPipeSidecarLandmark> landmarks,
+        int index,
+        out MediaPipeSidecarLandmark landmark)
+    {
+        if (index >= 0 && index < landmarks.Count)
+        {
+            landmark = landmarks[index];
+            return true;
+        }
+
+        landmark = new MediaPipeSidecarLandmark();
+        return false;
     }
 
     private static Rect? BoundingRect(IReadOnlyList<Point> points)

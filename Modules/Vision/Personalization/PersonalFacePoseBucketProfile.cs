@@ -26,6 +26,12 @@ public sealed class PersonalFacePoseBucketProfile
 
     public PersonalMetricDistribution FaceAspectRatio { get; set; } = new();
 
+    public PersonalMetricDistribution EyeMidlineXToFaceWidth { get; set; } = new();
+
+    public PersonalMetricDistribution MouthCenterXToFaceWidth { get; set; } = new();
+
+    public PersonalMetricDistribution EyeToMouthXOffsetToFaceWidth { get; set; } = new();
+
     public PersonalMetricDistribution InterEyeDistanceToFaceWidth { get; set; } = new();
 
     public PersonalMetricDistribution MouthWidthToFaceWidth { get; set; } = new();
@@ -82,50 +88,50 @@ public static class PersonalFacePoseBuckets
         new(
             FrontNeutral,
             "Front neutral pose",
-            "Straight-on, low-roll pose used as the safest identity and neutral-preview reference.",
+            "Straight-on, low-C pose used as the safest identity and neutral-preview reference.",
             "Look straight at the camera with the face relaxed and glasses visible.",
             PrimaryNeutralReference: true,
             RequiredForAvatarCoverage: true),
         new(
             YawNegative,
-            "Negative yaw turn",
-            "Head turned toward the negative-yaw side; kept separate from neutral identity shape.",
-            "Turn your head slowly toward the negative-yaw side while keeping both eyes visible.",
+            "Negative B turn",
+            "Head turned toward the negative-B side; kept separate from neutral identity shape.",
+            "Turn your head slowly toward the negative-B side while keeping both eyes visible.",
             PrimaryNeutralReference: false,
             RequiredForAvatarCoverage: true),
         new(
             YawPositive,
-            "Positive yaw turn",
-            "Head turned toward the positive-yaw side; kept separate from neutral identity shape.",
-            "Turn your head slowly toward the positive-yaw side while keeping both eyes visible.",
+            "Positive B turn",
+            "Head turned toward the positive-B side; kept separate from neutral identity shape.",
+            "Turn your head slowly toward the positive-B side while keeping both eyes visible.",
             PrimaryNeutralReference: false,
             RequiredForAvatarCoverage: true),
         new(
             PitchNegative,
-            "Negative pitch tilt",
-            "Head tilted in the negative-pitch direction; used for pose-aware animation coverage.",
-            "Tilt your head slightly in the negative-pitch direction with the mouth and glasses visible.",
+            "Negative A tilt",
+            "Head tilted in the negative-A direction; used for pose-aware animation coverage.",
+            "Tilt your head slightly in the negative-A direction with the mouth and glasses visible.",
             PrimaryNeutralReference: false,
             RequiredForAvatarCoverage: true),
         new(
             PitchPositive,
-            "Positive pitch tilt",
-            "Head tilted in the positive-pitch direction; used for pose-aware animation coverage.",
-            "Tilt your head slightly in the positive-pitch direction with the mouth and glasses visible.",
+            "Positive A tilt",
+            "Head tilted in the positive-A direction; used for pose-aware animation coverage.",
+            "Tilt your head slightly in the positive-A direction with the mouth and glasses visible.",
             PrimaryNeutralReference: false,
             RequiredForAvatarCoverage: true),
         new(
             RollNegative,
-            "Negative roll tilt",
-            "Head rolled toward the negative-roll side; used to separate pose from face shape.",
-            "Roll your head slightly toward the negative-roll side without leaving the frame.",
+            "Negative C tilt",
+            "Head tilted toward the negative-C side; used to separate pose from face shape.",
+            "Tilt your head slightly toward the negative-C side without leaving the frame.",
             PrimaryNeutralReference: false,
             RequiredForAvatarCoverage: true),
         new(
             RollPositive,
-            "Positive roll tilt",
-            "Head rolled toward the positive-roll side; used to separate pose from face shape.",
-            "Roll your head slightly toward the positive-roll side without leaving the frame.",
+            "Positive C tilt",
+            "Head tilted toward the positive-C side; used to separate pose from face shape.",
+            "Tilt your head slightly toward the positive-C side without leaving the frame.",
             PrimaryNeutralReference: false,
             RequiredForAvatarCoverage: true)
     ];

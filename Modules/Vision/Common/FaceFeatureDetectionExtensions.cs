@@ -38,6 +38,8 @@ public static class FaceFeatureDetectionExtensions
             RightEyeContour = detection.RightEyeContour.Count > 0
                 ? detection.RightEyeContour
                 : detection.RightEyeBox is Rect rightEye ? CreateEyeContour(rightEye) : [],
+            LeftBrowContour = detection.LeftEyeBox is Rect leftBrowEye ? CreateBrowContour(leftBrowEye) : [],
+            RightBrowContour = detection.RightEyeBox is Rect rightBrowEye ? CreateBrowContour(rightBrowEye) : [],
             OuterLipContour = detection.OuterLipContour.Count > 0
                 ? detection.OuterLipContour
                 : detection.MouthBox is Rect mouth ? CreateMouthContour(mouth, outer: true) : [],
@@ -83,6 +85,21 @@ public static class FaceFeatureDetectionExtensions
             new(centerX + halfWidth * 0.50d, centerY + halfHeight),
             new(centerX, centerY + halfHeight * 1.10d),
             new(centerX - halfWidth * 0.50d, centerY + halfHeight)
+        ];
+    }
+
+    private static IReadOnlyList<Point> CreateBrowContour(Rect eyeBox)
+    {
+        var centerX = eyeBox.Left + eyeBox.Width / 2d;
+        var y = Math.Clamp(eyeBox.Top - eyeBox.Height * 0.50d, 0d, 1d);
+        var halfWidth = eyeBox.Width * 0.52d;
+        return
+        [
+            new(Math.Clamp(centerX - halfWidth, 0d, 1d), y + eyeBox.Height * 0.05d),
+            new(Math.Clamp(centerX - halfWidth * 0.45d, 0d, 1d), y - eyeBox.Height * 0.03d),
+            new(centerX, y - eyeBox.Height * 0.06d),
+            new(Math.Clamp(centerX + halfWidth * 0.45d, 0d, 1d), y - eyeBox.Height * 0.03d),
+            new(Math.Clamp(centerX + halfWidth, 0d, 1d), y + eyeBox.Height * 0.05d)
         ];
     }
 

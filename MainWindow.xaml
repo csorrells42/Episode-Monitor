@@ -206,6 +206,7 @@
                 <Grid x:Name="PreviewHost" SizeChanged="PreviewHostSizeChanged">
                     <Grid x:Name="DirectX12PreviewLayer" Visibility="Collapsed" ClipToBounds="True" />
                     <Image x:Name="PreviewImage" Stretch="Uniform" Visibility="Collapsed" />
+                    <Canvas x:Name="LiveWireframeCanvas" Visibility="Collapsed" ClipToBounds="True" Background="#05080c" />
                     <Canvas x:Name="FaceCueGuideCanvas" IsHitTestVisible="False" />
                     <StackPanel x:Name="PreviewPlaceholder" VerticalAlignment="Center" HorizontalAlignment="Center">
                         <TextBlock Text="Episode Monitor" FontSize="30" FontWeight="Bold" HorizontalAlignment="Center" />
@@ -377,7 +378,19 @@
                                             <Button x:Name="AvatarLearningToggleButton" Grid.Column="2" Style="{StaticResource StartStopButtonStyle}" Content="Start Avatar Learning" ToolTip="Starts or stops measurement-only learning for the Avatar System. Event recording is separate." Padding="10,6" Margin="8,0,0,0" Click="AvatarLearningToggleClicked" />
                                         </Grid>
                                         <TextBlock x:Name="AvatarLearningStatusText" Text="Not learning: confirm Chris, then start avatar learning when you are symptom-free." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,0" />
-                                        <Button Content="Open Avatar System" ToolTip="Opens one combined page for face preview, learning data, collection audit, avatar package, and next capture plan." HorizontalAlignment="Left" Margin="0,10,0,0" Click="OpenAvatarSystemClicked" />
+                                        <TextBlock x:Name="AvatarTrackingSanityText" Text="Tracking sanity: waiting for enough accepted measurements." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
+                                        <Border Background="#0b141c" BorderBrush="#243545" BorderThickness="1" Padding="10" Margin="0,10,0,0">
+                                            <StackPanel>
+                                                <TextBlock x:Name="AvatarEasyModeTitleText" Text="Easy Avatar Mode" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="AvatarEasyModeDetailText" Text="Confirm Chris, start the camera, then use easy mode for the next recommended avatar capture." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
+                                                <Button x:Name="AvatarEasyModeButton" Style="{StaticResource StartStopButtonStyle}" Content="Easy Avatar Mode" ToolTip="Starts guided measurement-only avatar learning and follows the next capture-plan recommendation." HorizontalAlignment="Left" Padding="10,6" Margin="0,8,0,0" Click="AvatarEasyModeClicked" />
+                                            </StackPanel>
+                                        </Border>
+                                        <UniformGrid Columns="2" Margin="0,10,0,0">
+                                            <Button Content="Open Avatar System" ToolTip="Opens one combined page for face preview, learning data, collection audit, avatar package, and next capture plan." Margin="0,0,6,0" Click="OpenAvatarSystemClicked" />
+                                            <Button Content="Open Last 10 Good Features" ToolTip="Opens the rolling dense landmark mesh viewer for the latest ten good feature locks." Margin="6,0,0,0" Click="OpenLastGoodFeaturesClicked" />
+                                            <Button x:Name="RebuildAvatarDataButton" Content="Rebuild Avatar Data" ToolTip="Archives the current Avatar measurements and starts a fresh measurement-only model." Margin="0,8,6,0" Click="RebuildAvatarDataClicked" />
+                                        </UniformGrid>
                                     </StackPanel>
                                 </Border>
 
@@ -396,6 +409,8 @@
                                 <ComboBox x:Name="TrackingFidelityComboBox" SelectionChanged="TrackingFidelitySelectionChanged" />
                                 <TextBlock x:Name="TrackingFidelityStatusText" Text="Tracking frames: 1920px max at 10 fps." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
                                 <CheckBox x:Name="DirectX12PreviewCheckBox" Content="DX12 preview viewport" IsChecked="True" Checked="DirectX12PreviewChanged" Unchecked="DirectX12PreviewChanged" />
+                                <ToggleButton x:Name="LiveWireframePreviewToggle" Content="Show Live Wireframe" ToolTip="Hides the webcam preview and shows the latest accepted dense wireframe sample while camera analysis keeps running." HorizontalAlignment="Left" Margin="0,8,0,0" Checked="LiveWireframePreviewChanged" Unchecked="LiveWireframePreviewChanged" />
+                                <CheckBox x:Name="LiveWireframeHeadLockCheckBox" Content="Head-lock live wireframe" IsChecked="True" ToolTip="Draws the live dense wireframe in a head-attached eye-line/chin coordinate frame so feature sliding is easier to spot." Checked="LiveWireframeHeadLockChanged" Unchecked="LiveWireframeHeadLockChanged" />
 
                                 <Separator Margin="0,18,0,14" Background="#243545" />
 

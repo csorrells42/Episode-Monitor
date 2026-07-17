@@ -1,4 +1,5 @@
 using EpisodeMonitor.Modules.Vision.Personalization;
+using EpisodeMonitor.Modules.Vision.Analysis;
 
 namespace EpisodeMonitor.Modules.Vision.Reconstruction;
 
@@ -36,6 +37,10 @@ public sealed class MeasurementAvatarSystemDashboard
 
     public PersonalFaceCaptureQualityAssessment CurrentCaptureQuality { get; set; } = PersonalFaceCaptureQualityAssessment.Waiting;
 
+    public HeadPoseEstimate CurrentHeadPose { get; set; } = HeadPoseEstimate.None;
+
+    public LastGoodFeatureMeshStabilityReport LastGoodFeatureStability { get; set; } = new();
+
     public string FacePreviewHtmlPath { get; set; } = "";
 
     public string LearningDataReportHtmlPath { get; set; } = "";
@@ -46,6 +51,8 @@ public sealed class MeasurementAvatarSystemDashboard
 
     public string CapturePlanHtmlPath { get; set; } = "";
 
+    public string LastGoodFeaturesHtmlPath { get; set; } = "";
+
     public string StoragePolicy { get; set; } =
-        "Measurement-only avatar system dashboard. Passive learning stores numbers, scores, and reasons; it does not store continuous webcam video, room imagery, raw frames, or full landmark meshes.";
+        "Measurement-only avatar system dashboard. Passive learning stores numbers, scores, and reasons; it does not store continuous webcam video or room imagery. The Last 10 Good Features page keeps only a rolling inspection cache of the latest dense landmark meshes.";
 }

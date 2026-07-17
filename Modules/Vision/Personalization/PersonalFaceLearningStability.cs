@@ -6,6 +6,8 @@ public sealed class PersonalFaceLearningStability
 
     public double AcceptedSampleWeight { get; set; }
 
+    public double MinimumTrackedDistributionWeight { get; set; }
+
     public double AnchorTargetWeight { get; set; }
 
     public double AnchorPercent { get; set; }

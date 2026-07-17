@@ -36,11 +36,19 @@ public sealed class PersonalFaceMotionModel
 
     public PersonalMetricDistribution HeadRollDegrees { get; set; } = new();
 
+    public PersonalMetricDistribution ZApparentDistanceUnits { get; set; } = new();
+
+    public PersonalMetricDistribution ZRelativeToReference { get; set; } = new();
+
+    public PersonalMetricDistribution ZConfidencePercent { get; set; } = new();
+
     public PersonalMetricDistribution AverageEyeOpeningRatio { get; set; } = new();
 
     public PersonalMetricDistribution MouthOpeningRatio { get; set; } = new();
 
     public PersonalMetricDistribution JawDroopRatio { get; set; } = new();
+
+    public PersonalMetricDistribution AverageBrowHeightRatio { get; set; } = new();
 
     public PersonalMetricDistribution MediaPipeAverageEyeBlinkPercent { get; set; } = new();
 
@@ -60,17 +68,25 @@ public sealed class PersonalFaceMotionModel
 
     public PersonalMetricDistribution JawRecoveryVelocityPerSecond { get; set; } = new();
 
+    public PersonalMetricDistribution BrowRaiseVelocityPerSecond { get; set; } = new();
+
+    public PersonalMetricDistribution BrowLowerVelocityPerSecond { get; set; } = new();
+
     public PersonalMetricDistribution HeadYawVelocityDegreesPerSecond { get; set; } = new();
 
     public PersonalMetricDistribution HeadPitchVelocityDegreesPerSecond { get; set; } = new();
 
     public PersonalMetricDistribution HeadRollVelocityDegreesPerSecond { get; set; } = new();
 
+    public PersonalMetricDistribution ZApparentVelocityUnitsPerSecond { get; set; } = new();
+
     public double EyeClosingWithMouthOpeningRate { get; set; }
 
     public double EyeClosingWithJawDroopRate { get; set; }
 
     public double MouthOpeningWithJawDroopRate { get; set; }
+
+    public double EyeClosingWithBrowLoweringRate { get; set; }
 
     public int EyeArtifactSuppressedObservations { get; set; }
 

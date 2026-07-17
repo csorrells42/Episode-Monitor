@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using EpisodeMonitor;
 using EpisodeMonitor.Modules.Episodes;
 using EpisodeMonitor.Modules.Vision.Analysis;
 using EpisodeMonitor.Modules.Vision.Common;
@@ -23,7 +24,14 @@ using WpfRect = System.Windows.Rect;
 
 if (args.Length >= 2 && args[0].Equals("--write-synthetic-video", StringComparison.OrdinalIgnoreCase))
 {
-    WriteSyntheticVideo(Path.GetFullPath(args[1]));
+    WriteSyntheticVideo(Path.GetFullPath(args[1]), includeEyeInset: true);
+    Console.WriteLine(Path.GetFullPath(args[1]));
+    return;
+}
+
+if (args.Length >= 2 && args[0].Equals("--write-synthetic-no-inset-video", StringComparison.OrdinalIgnoreCase))
+{
+    WriteSyntheticVideo(Path.GetFullPath(args[1]), includeEyeInset: false);
     Console.WriteLine(Path.GetFullPath(args[1]));
     return;
 }
@@ -35,14 +43,31 @@ if (args.Length >= 2 && args[0].Equals("--write-landmark-stress", StringComparis
     return;
 }
 
+if (TryGetOption(args, "--audit-folder", out var auditFolder))
+{
+    RunSavedDataAudit(Path.GetFullPath(auditFolder), args.Any(static arg => arg.Equals("--write-audit-reports", StringComparison.OrdinalIgnoreCase)));
+    return;
+}
+
 RunApertureSmoke();
 RunFaceLockStabilitySmoke();
 RunPersonalFaceModelSmoke();
+RunPersonalFaceSurfaceProfileSmoke();
+RunPersonalFaceApertureConsistencySmoke();
+RunEyeApertureReliabilityAuditSmoke();
+RunMouthVerticalAnchorAuditSmoke();
+RunPoseExplainedFeatureMotionAuditSmoke();
+RunPersonalFaceLearningAuditGateSmoke();
 RunPersonalFaceCaptureQualitySmoke();
+RunHeadPoseEstimatorSmoke();
+RunStoredHeadPoseRoutingSmoke();
 RunPersonalFaceMotionModelSmoke();
 RunFaceReconstructionContractSmoke();
 RunMeasurementFacePreviewSmoke();
+RunLastGoodFeatureMeshSmoke();
 RunMeasurementAvatarTrainingPackageSmoke();
+RunEpisodeMonitorStartupOptionsSmoke();
+RunMeasurementAvatarEasyModeAdvisorSmoke();
 RunMeasurementAvatarCapturePlanSmoke();
 RunSyntheticLandmarkStressArtifactSmoke();
 RunTexturePreviewRoutingSmoke();
@@ -52,6 +77,849 @@ const int SyntheticVideoWidth = 640;
 const int SyntheticVideoHeight = 360;
 const double SyntheticVideoFramesPerSecond = 12d;
 const int SyntheticVideoFrameCount = 72;
+
+static void RunSavedDataAudit(string folder, bool writeReports)
+{
+    if (!Directory.Exists(folder))
+    {
+        throw new DirectoryNotFoundException($"Audit folder does not exist: {folder}");
+    }
+
+    var model = new PersonalFaceModelStore().TryRead(folder)
+        ?? throw new FileNotFoundException("No personal_face_model.json found in the audit folder.", Path.Combine(folder, "personal_face_model.json"));
+    var samples = PersonalFaceMeasurementJournal
+        .ReadRecentSamples(folder, PersonalFaceMeasurementJournal.DefaultRecentSampleReadLimit)
+        .Where(sample => string.Equals(sample.SubjectId, model.SubjectId, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+    var observations = samples
+        .Select(PersonalFaceMotionObservation.FromMeasurementSample)
+        .ToList();
+    var motion = new PersonalFaceMotionModelBuilder().Build(observations);
+    if (motion.ObservationCount == 0)
+    {
+        motion.SubjectId = model.SubjectId;
+        motion.SubjectDisplayName = model.SubjectDisplayName;
+        motion.SubjectCollectionMode = model.SubjectCollectionMode;
+        motion.CreatedAtUtc = model.CreatedAtUtc != default ? model.CreatedAtUtc : DateTime.UtcNow;
+        motion.UpdatedAtUtc = model.UpdatedAtUtc != default ? model.UpdatedAtUtc : DateTime.UtcNow;
+    }
+
+    var measurementBytes = PersonalFaceMeasurementJournal.GetMeasurementsSizeBytes(folder);
+    var readiness = new PersonalFaceCorpusReadinessBuilder().Build(model, motion, samples, measurementBytes);
+    var motionPath = Path.Combine(folder, "personal_face_motion_model.json");
+    var readinessPath = Path.Combine(folder, PersonalFaceCorpusReadinessStore.DefaultJsonFileName);
+    if (writeReports)
+    {
+        motionPath = new PersonalFaceMotionModelStore().Write(folder, motion);
+        readinessPath = new PersonalFaceCorpusReadinessStore().Write(folder, readiness);
+    }
+
+    Console.WriteLine($"Episode Monitor data audit: {folder}");
+    Console.WriteLine($"Subject: {model.SubjectDisplayName} ({model.SubjectId})");
+    Console.WriteLine($"Accepted samples: {model.AcceptedSamples}");
+    Console.WriteLine($"Retained journal rows: {samples.Count}");
+    Console.WriteLine($"Journal coverage: {readiness.MeasurementJournalCoveragePercent:0.#}%");
+    Console.WriteLine($"Overall readiness: {readiness.OverallReadinessPercent:0.#}%");
+    Console.WriteLine($"Data audit health: {readiness.DataAuditHealthPercent:0.#}%");
+    Console.WriteLine($"Pose estimation health: {readiness.PoseEstimationHealthPercent:0.#}%");
+    Console.WriteLine($"Feature anchoring health: {readiness.FeatureAnchoringHealthPercent:0.#}%");
+    Console.WriteLine($"Identity session health: {readiness.IdentitySessionHealthPercent:0.#}%");
+    Console.WriteLine($"Recent identity samples/confidence/outliers: {readiness.RecentIdentityMeasurementSamples} / {FormatOptional(readiness.AverageRecentIdentityConfidencePercent)}% avg / {FormatRate(readiness.RecentIdentityOutlierFrameRate)}");
+    Console.WriteLine($"Mouth vertical anchor health: {readiness.MouthVerticalAnchorHealthPercent:0.#}%");
+    Console.WriteLine($"Jaw droop scale health: {readiness.JawDroopScaleHealthPercent:0.#}%");
+    Console.WriteLine($"A/B/C ranges: {FormatOptional(readiness.HeadPitchRangeDegrees)} / {FormatOptional(readiness.HeadYawRangeDegrees)} / {FormatOptional(readiness.HeadRollRangeDegrees)} deg");
+    Console.WriteLine($"Eye/Mouth/Jaw ranges: {FormatOptional(readiness.EyeOpeningRange)} / {FormatOptional(readiness.MouthOpeningRange)} / {FormatOptional(readiness.JawDroopRange)}");
+    Console.WriteLine(writeReports ? $"Motion model: {motionPath}" : "Motion model write skipped; audit is read-only.");
+    Console.WriteLine(writeReports ? $"Readiness report: {readinessPath}" : "Readiness report write skipped; audit is read-only.");
+    Console.WriteLine(writeReports ? $"Readiness HTML: {PersonalFaceCorpusReadinessStore.GetHtmlPath(readinessPath)}" : "Readiness HTML write skipped; audit is read-only.");
+
+    if (readiness.DataAuditFindings.Count == 0)
+    {
+        Console.WriteLine("Data audit findings: none");
+    }
+    else
+    {
+        Console.WriteLine("Data audit findings:");
+        foreach (var finding in readiness.DataAuditFindings)
+        {
+            Console.WriteLine($"- {finding}");
+        }
+    }
+
+    Environment.ExitCode = readiness.DataAuditHealthPercent >= 50d ? 0 : 4;
+}
+
+static void RunPersonalFaceLearningAuditGateSmoke()
+{
+    var earlyRisk = PersonalFaceLearningAuditGate.Evaluate(new PersonalFaceCorpusReadiness
+    {
+        AcceptedBaselineSamples = 22,
+        DataAuditHealthPercent = 30d,
+        PoseEstimationHealthPercent = 30d,
+        FeatureAnchoringHealthPercent = 30d,
+        DataAuditFindings =
+        [
+            "head A/B rotations are not moving even though the face moves in frame; turned-head evidence may be getting stored as 2D feature movement instead of head pose."
+        ]
+    });
+    Require(!earlyRisk.HoldLearning, "tracking audit gate held early/warming data before enough samples existed");
+
+    var healthy = PersonalFaceLearningAuditGate.Evaluate(new PersonalFaceCorpusReadiness
+    {
+        AcceptedBaselineSamples = 120,
+        DataAuditHealthPercent = 86d,
+        PoseEstimationHealthPercent = 82d,
+        FeatureAnchoringHealthPercent = 88d
+    });
+    Require(!healthy.HoldLearning, $"tracking audit gate held healthy data: {healthy.Reason}");
+
+    var consistentPoseBuckets = PersonalFacePoseBucketConsistencyAnalyzer.Analyze(PoseBucketProfiles());
+    Require(consistentPoseBuckets.ComparedPoseBucketCount > 0, "pose-bucket consistency analyzer did not compare healthy turned-head buckets");
+    Require(consistentPoseBuckets.SuspiciousPoseBucketCount == 0, "pose-bucket consistency analyzer flagged healthy pose buckets");
+
+    var driftingPoseBuckets = PoseBucketProfiles();
+    var negativeYawBucket = driftingPoseBuckets.First(static bucket => bucket.BucketId == PersonalFacePoseBuckets.YawNegative);
+    negativeYawBucket.InterEyeDistanceToFaceWidth = Distribution(0.19d, negativeYawBucket.SampleCount, negativeYawBucket.TotalWeight, spread: 0.018d);
+    negativeYawBucket.MouthWidthToFaceWidth = Distribution(0.58d, negativeYawBucket.SampleCount, negativeYawBucket.TotalWeight, spread: 0.02d);
+    var driftingPoseBucketReport = PersonalFacePoseBucketConsistencyAnalyzer.Analyze(driftingPoseBuckets);
+    Require(driftingPoseBucketReport.SuspiciousPoseBucketCount > 0, "pose-bucket consistency analyzer did not flag intentionally drifting identity ratios");
+    Require(
+        driftingPoseBucketReport.Findings.Any(static finding => finding.Contains("face features sliding", StringComparison.OrdinalIgnoreCase)),
+        "pose-bucket consistency analyzer did not produce an actionable sliding-features finding");
+
+    var axisMismatchPoseBuckets = PoseBucketProfiles();
+    var positiveYawBucket = axisMismatchPoseBuckets.First(static bucket => bucket.BucketId == PersonalFacePoseBuckets.YawPositive);
+    positiveYawBucket.HeadYawDegrees = Distribution(1.2d, positiveYawBucket.SampleCount, positiveYawBucket.TotalWeight, spread: 0.5d);
+    var axisMismatchPoseBucketReport = PersonalFacePoseBucketConsistencyAnalyzer.Analyze(axisMismatchPoseBuckets);
+    Require(axisMismatchPoseBucketReport.SuspiciousPoseBucketCount > 0, "pose-bucket consistency analyzer did not flag a B bucket with almost no measured B rotation");
+    Require(
+        axisMismatchPoseBucketReport.Comparisons.Any(static comparison =>
+            comparison.BucketId == PersonalFacePoseBuckets.YawPositive
+            && comparison.PoseAxisHealthPercent < 55d
+            && comparison.Status.Equals("suspicious", StringComparison.OrdinalIgnoreCase)),
+        "pose-bucket consistency analyzer did not expose the pose-axis health failure");
+    Require(
+        axisMismatchPoseBucketReport.Findings.Any(static finding =>
+            finding.Contains("pose bucket axis mismatch", StringComparison.OrdinalIgnoreCase)
+            && finding.Contains("head pose", StringComparison.OrdinalIgnoreCase)),
+        "pose-bucket consistency analyzer did not explain the pose-axis mismatch");
+
+    var translationOnlyPoseFinding = PersonalFaceLearningAuditGate.Evaluate(new PersonalFaceCorpusReadiness
+    {
+        AcceptedBaselineSamples = 120,
+        DataAuditHealthPercent = 62d,
+        PoseEstimationHealthPercent = 55d,
+        FeatureAnchoringHealthPercent = 76d,
+        DataAuditFindings =
+        [
+            "A/B rotation coverage is still early while the face position or scale changed. This is not treated as a tracking failure by itself; collect deliberate left/right and up/down head turns before trusting turned-head avatar fitting."
+        ]
+    });
+    Require(!translationOnlyPoseFinding.HoldLearning, $"tracking audit gate held translation-only pose coverage guidance: {translationOnlyPoseFinding.Reason}");
+
+    var highRiskFeatureFinding = PersonalFaceLearningAuditGate.Evaluate(new PersonalFaceCorpusReadiness
+    {
+        AcceptedBaselineSamples = 120,
+        DataAuditHealthPercent = 68d,
+        PoseEstimationHealthPercent = 75d,
+        FeatureAnchoringHealthPercent = 55d,
+        DataAuditFindings =
+        [
+            "face-local feature proportions are drifting more than expected (eye spacing range 0.22, mouth width range 0.2, eye-to-mouth range 0.16); review overlay/video for features sliding on the head."
+        ]
+    });
+    Require(highRiskFeatureFinding.HoldLearning, "tracking audit gate did not hold high-risk feature anchoring finding");
+    Require(highRiskFeatureFinding.Reason.Contains("drifting", StringComparison.OrdinalIgnoreCase), "tracking audit gate feature hold reason was not actionable");
+
+    var highRiskPoseBucketFinding = PersonalFaceLearningAuditGate.Evaluate(new PersonalFaceCorpusReadiness
+    {
+        AcceptedBaselineSamples = 120,
+        DataAuditHealthPercent = 72d,
+        PoseEstimationHealthPercent = 78d,
+        FeatureAnchoringHealthPercent = 82d,
+        PoseBucketConsistencyHealthPercent = 42d,
+        DataAuditFindings =
+        [
+            "pose bucket consistency drift in Negative B turn: identity-shaped ratios changed vs front-neutral"
+        ]
+    });
+    Require(highRiskPoseBucketFinding.HoldLearning, "tracking audit gate did not hold high-risk pose-bucket consistency finding");
+    Require(highRiskPoseBucketFinding.Reason.Contains("pose bucket consistency", StringComparison.OrdinalIgnoreCase), "tracking audit gate pose-bucket hold reason was not actionable");
+
+    var highRiskPoseAxisFinding = PersonalFaceLearningAuditGate.Evaluate(new PersonalFaceCorpusReadiness
+    {
+        AcceptedBaselineSamples = 120,
+        DataAuditHealthPercent = 72d,
+        PoseEstimationHealthPercent = 78d,
+        FeatureAnchoringHealthPercent = 82d,
+        PoseBucketConsistencyHealthPercent = 48d,
+        DataAuditFindings =
+        [
+            "pose bucket axis mismatch in Positive B turn: expected positive B rotation, measured B 1.2 deg; head turns may be getting stored without the expected head pose."
+        ]
+    });
+    Require(highRiskPoseAxisFinding.HoldLearning, "tracking audit gate did not hold high-risk pose-axis mismatch finding");
+    Require(highRiskPoseAxisFinding.Reason.Contains("pose bucket axis mismatch", StringComparison.OrdinalIgnoreCase), "tracking audit gate pose-axis hold reason was not actionable");
+
+    var highRiskSurfaceGeometryFinding = PersonalFaceLearningAuditGate.Evaluate(new PersonalFaceCorpusReadiness
+    {
+        AcceptedBaselineSamples = 140,
+        DataAuditHealthPercent = 66d,
+        PoseEstimationHealthPercent = 80d,
+        FeatureAnchoringHealthPercent = 82d,
+        SurfaceGeometryHealthPercent = 34d,
+        SurfaceGeometryReviewPatchCount = 3,
+        SurfaceGeometryStatus = "3 patch(es) need review",
+        DataAuditFindings =
+        [
+            "surface geometry health is weak (34%): 3 measured patch(es) need review; status 3 patch(es) need review."
+        ]
+    });
+    Require(highRiskSurfaceGeometryFinding.HoldLearning, "tracking audit gate did not hold high-risk surface geometry finding");
+    Require(highRiskSurfaceGeometryFinding.Reason.Contains("surface geometry", StringComparison.OrdinalIgnoreCase), "tracking audit gate surface-geometry hold reason was not actionable");
+
+    var identitySessionRisk = BuildSyntheticIdentitySessionReadiness(outlierFrames: 14, normalFrames: 22);
+    Require(identitySessionRisk.IdentitySessionHealthPercent < 60d, $"identity-session audit did not lower health enough: {identitySessionRisk.IdentitySessionHealthPercent}");
+    Require(identitySessionRisk.RecentIdentityOutlierFrameRate >= 0.30d, $"identity-session audit did not retain outlier rate: {identitySessionRisk.RecentIdentityOutlierFrameRate}");
+    Require(
+        identitySessionRisk.DataAuditFindings.Any(static finding =>
+            finding.Contains("recent identity-session high", StringComparison.OrdinalIgnoreCase)),
+        "identity-session audit did not produce a high-risk finding");
+    var highRiskIdentitySessionFinding = PersonalFaceLearningAuditGate.Evaluate(identitySessionRisk);
+    Require(highRiskIdentitySessionFinding.HoldLearning, "tracking audit gate did not hold high-risk recent identity-session finding");
+    Require(highRiskIdentitySessionFinding.Reason.Contains("recent identity-session", StringComparison.OrdinalIgnoreCase), "tracking audit gate identity-session hold reason was not actionable");
+
+    var lowHealth = PersonalFaceLearningAuditGate.Evaluate(new PersonalFaceCorpusReadiness
+    {
+        AcceptedBaselineSamples = 120,
+        DataAuditHealthPercent = 44d,
+        PoseEstimationHealthPercent = 55d,
+        FeatureAnchoringHealthPercent = 58d
+    });
+    Require(lowHealth.HoldLearning, "tracking audit gate did not hold low data-audit health");
+
+    var lowPoseAxis = PersonalFaceLearningAuditGate.Evaluate(new PersonalFaceCorpusReadiness
+    {
+        AcceptedBaselineSamples = 120,
+        DataAuditHealthPercent = 75d,
+        PoseEstimationHealthPercent = 35d,
+        FeatureAnchoringHealthPercent = 70d
+    });
+    Require(lowPoseAxis.HoldLearning, "tracking audit gate did not hold very low pose health");
+}
+
+static void RunPersonalFaceApertureConsistencySmoke()
+{
+    var healthySamples = Enumerable.Range(0, 24)
+        .Select(index =>
+        {
+            var progress = index / 23d;
+            return ApertureSample(
+                eyeOpening: 0.31d - progress * 0.17d,
+                blinkPercent: 8d + progress * 72d,
+                mouthOpening: 0.04d + progress * 0.22d,
+                jawDroop: 0.01d + progress * 0.13d,
+                jawOpenPercent: 5d + progress * 62d,
+                mouthClosePercent: 90d - progress * 66d);
+        })
+        .ToList();
+    var healthy = PersonalFaceApertureConsistencyAnalyzer.Analyze(healthySamples);
+    Require(healthy.HealthPercent >= 82d, $"aperture consistency analyzer scored healthy corroborated samples too low: {healthy.HealthPercent}");
+    Require(healthy.EyeOpeningBlinkCorrelation < -0.85d, $"healthy eye aperture correlation did not oppose blink evidence: {healthy.EyeOpeningBlinkCorrelation}");
+    Require(healthy.MouthOpeningEvidenceCorrelation > 0.85d, $"healthy mouth aperture correlation did not match mouth evidence: {healthy.MouthOpeningEvidenceCorrelation}");
+    Require(healthy.JawDroopEvidenceCorrelation > 0.85d, $"healthy jaw droop correlation did not match jaw evidence: {healthy.JawDroopEvidenceCorrelation}");
+
+    var badEyeSamples = Enumerable.Range(0, 24)
+        .Select(index =>
+        {
+            var progress = index / 23d;
+            return ApertureSample(
+                eyeOpening: 0.12d + progress * 0.17d,
+                blinkPercent: 8d + progress * 72d,
+                mouthOpening: 0.04d + progress * 0.22d,
+                jawDroop: 0.01d + progress * 0.13d,
+                jawOpenPercent: 5d + progress * 62d,
+                mouthClosePercent: 90d - progress * 66d);
+        })
+        .ToList();
+    var badEye = PersonalFaceApertureConsistencyAnalyzer.Analyze(badEyeSamples);
+    Require(badEye.EyeApertureHealthPercent < 55d, $"aperture consistency analyzer did not penalize wrong-direction eye evidence: {badEye.EyeApertureHealthPercent}");
+    Require(
+        badEye.Findings.Any(static finding => finding.Contains("behind-glasses eyelid", StringComparison.OrdinalIgnoreCase)),
+        "aperture consistency analyzer did not explain wrong-direction eye evidence");
+
+    var badMouthSamples = Enumerable.Range(0, 24)
+        .Select(index =>
+        {
+            var progress = index / 23d;
+            return ApertureSample(
+                eyeOpening: 0.31d - progress * 0.17d,
+                blinkPercent: 8d + progress * 72d,
+                mouthOpening: 0.28d - progress * 0.20d,
+                jawDroop: 0.13d - progress * 0.10d,
+                jawOpenPercent: 5d + progress * 62d,
+                mouthClosePercent: 90d - progress * 66d);
+        })
+        .ToList();
+    var badMouth = PersonalFaceApertureConsistencyAnalyzer.Analyze(badMouthSamples);
+    Require(badMouth.MouthApertureHealthPercent < 55d, $"aperture consistency analyzer did not penalize wrong-direction mouth evidence: {badMouth.MouthApertureHealthPercent}");
+    Require(
+        badMouth.Findings.Any(static finding => finding.Contains("under the nose", StringComparison.OrdinalIgnoreCase)),
+        "aperture consistency analyzer did not explain wrong-direction mouth evidence");
+
+    var realLikeSparseMouthCloseSamples = Enumerable.Range(0, 24)
+        .Select(index =>
+        {
+            var progress = index / 23d;
+            return ApertureSample(
+                eyeOpening: 0.31d - progress * 0.17d,
+                blinkPercent: 8d + progress * 72d,
+                mouthOpening: 0.04d + progress * 0.18d,
+                jawDroop: 0.01d + progress * 0.09d,
+                jawOpenPercent: 1d + progress * 12d,
+                mouthClosePercent: 0.15d + progress * 0.70d);
+        })
+        .ToList();
+    var realLikeSparseMouthClose = PersonalFaceApertureConsistencyAnalyzer.Analyze(realLikeSparseMouthCloseSamples);
+    Require(
+        realLikeSparseMouthClose.MouthOpeningEvidenceCorrelation > 0.85d,
+        $"aperture consistency analyzer let near-zero mouthClose dominate jaw-open evidence: {realLikeSparseMouthClose.MouthOpeningEvidenceCorrelation}");
+    Require(
+        realLikeSparseMouthClose.MouthApertureHealthPercent >= 70d,
+        $"aperture consistency analyzer scored real-like jaw-open corroboration too low: {realLikeSparseMouthClose.MouthApertureHealthPercent}");
+}
+
+static PersonalFaceMeasurementSample ApertureSample(
+    double eyeOpening,
+    double blinkPercent,
+    double mouthOpening,
+    double jawDroop,
+    double jawOpenPercent,
+    double mouthClosePercent)
+{
+    return new PersonalFaceMeasurementSample
+    {
+        CapturedAtUtc = DateTime.UtcNow,
+        CaptureQualityCanCollect = true,
+        AverageEyeOpeningRatio = eyeOpening,
+        MouthOpeningRatio = mouthOpening,
+        JawDroopRatio = jawDroop,
+        MediaPipeAverageEyeBlinkPercent = blinkPercent,
+        MediaPipeJawOpenPercent = jawOpenPercent,
+        MediaPipeMouthClosePercent = mouthClosePercent,
+        EyeQualityPercent = 88d,
+        MouthQualityPercent = 86d
+    };
+}
+
+static void RunEyeApertureReliabilityAuditSmoke()
+{
+    var healthy = BuildSyntheticEyeApertureReliabilityReadiness(
+        possibleOneEyeArtifactSamples: 0,
+        eyeArtifactSuppressedSamples: 0,
+        leftEyeReconstructedSamples: 1,
+        rightEyeReconstructedSamples: 1,
+        eyeAgreementAveragePercent: 92d,
+        eyeAgreementMinimumPercent: 80d);
+    Require(
+        healthy.EyeApertureReliabilityHealthPercent >= 90d,
+        $"clean eye aperture reliability audit scored too low: {healthy.EyeApertureReliabilityHealthPercent}");
+    Require(
+        healthy.PossibleOneEyeArtifactRate is 0d,
+        $"clean eye aperture reliability audit reported one-eye artifacts: {healthy.PossibleOneEyeArtifactRate}");
+
+    var polluted = BuildSyntheticEyeApertureReliabilityReadiness(
+        possibleOneEyeArtifactSamples: 24,
+        eyeArtifactSuppressedSamples: 18,
+        leftEyeReconstructedSamples: 30,
+        rightEyeReconstructedSamples: 30,
+        eyeAgreementAveragePercent: 51d,
+        eyeAgreementMinimumPercent: 24d);
+    Require(
+        polluted.EyeApertureReliabilityHealthPercent < 50d,
+        $"polluted eye aperture reliability audit did not lower health enough: {polluted.EyeApertureReliabilityHealthPercent}");
+    Require(
+        polluted.PossibleOneEyeArtifactRate >= 0.25d,
+        $"polluted eye aperture reliability audit did not count one-eye artifacts: {polluted.PossibleOneEyeArtifactRate}");
+    Require(
+        polluted.DataAuditFindings.Any(static finding =>
+            finding.Contains("eye aperture reliability", StringComparison.OrdinalIgnoreCase)
+            && finding.Contains("one-eye", StringComparison.OrdinalIgnoreCase)),
+        "polluted eye aperture reliability audit did not explain the one-eye artifact risk");
+}
+
+static PersonalFaceCorpusReadiness BuildSyntheticEyeApertureReliabilityReadiness(
+    int possibleOneEyeArtifactSamples,
+    int eyeArtifactSuppressedSamples,
+    int leftEyeReconstructedSamples,
+    int rightEyeReconstructedSamples,
+    double eyeAgreementAveragePercent,
+    double eyeAgreementMinimumPercent)
+{
+    const int sampleCount = 80;
+    var now = DateTime.UtcNow;
+    var model = new PersonalFaceModel
+    {
+        CreatedAtUtc = now,
+        UpdatedAtUtc = now.AddSeconds(sampleCount),
+        ObservedSamples = sampleCount,
+        AcceptedSamples = sampleCount,
+        AcceptedSampleWeight = sampleCount,
+        AverageFaceReliabilityPercent = 92d,
+        AverageFaceContinuityPercent = 90d,
+        AverageEyeReliabilityPercent = 90d,
+        AverageMouthReliabilityPercent = 90d,
+        PossibleOneEyeArtifactSamples = possibleOneEyeArtifactSamples,
+        EyeArtifactSuppressedSamples = eyeArtifactSuppressedSamples,
+        LeftEyeReconstructedSamples = leftEyeReconstructedSamples,
+        RightEyeReconstructedSamples = rightEyeReconstructedSamples,
+        IdentitySignatureSamples = sampleCount,
+        LearningStability = new PersonalFaceLearningStability
+        {
+            AnchorPercent = 82d,
+            AnchorStatus = "synthetic",
+            MaximumNextSampleInfluencePercent = 1.6d,
+            MaximumEventLikeNextSampleInfluencePercent = 0.8d
+        },
+        FaceCenterX = Metric(0.50d, sampleCount),
+        FaceCenterY = Metric(0.50d, sampleCount),
+        FaceWidth = Metric(0.40d, sampleCount),
+        FaceHeight = Metric(0.62d, sampleCount),
+        HeadYawDegrees = Metric(0d, sampleCount, 5d),
+        HeadPitchDegrees = Metric(0d, sampleCount, 3d),
+        HeadRollDegrees = Metric(0d, sampleCount, 3d),
+        LeftEyeOpeningRatio = Metric(0.25d, sampleCount),
+        RightEyeOpeningRatio = Metric(0.25d, sampleCount),
+        AverageEyeOpeningRatio = Metric(0.25d, sampleCount),
+        EyeAgreementPercent = Metric(eyeAgreementAveragePercent, sampleCount, spread: Math.Max(1d, eyeAgreementAveragePercent - eyeAgreementMinimumPercent)),
+        MouthOpeningRatio = Metric(0.08d, sampleCount),
+        JawDroopRatio = Metric(0.04d, sampleCount),
+        FaceAspectRatio = Metric(1.45d, sampleCount),
+        EyeMidlineXToFaceWidth = Metric(0.50d, sampleCount),
+        MouthCenterXToFaceWidth = Metric(0.50d, sampleCount),
+        EyeToMouthXOffsetToFaceWidth = Metric(0.02d, sampleCount),
+        InterEyeDistanceToFaceWidth = Metric(0.40d, sampleCount),
+        LeftEyeWidthToFaceWidth = Metric(0.14d, sampleCount),
+        RightEyeWidthToFaceWidth = Metric(0.14d, sampleCount),
+        MouthWidthToFaceWidth = Metric(0.28d, sampleCount),
+        EyeMidlineYToFaceHeight = Metric(0.36d, sampleCount),
+        MouthCenterYToFaceHeight = Metric(0.66d, sampleCount),
+        EyeToMouthYDistanceToFaceHeight = Metric(0.30d, sampleCount),
+        EyeGlarePercent = Metric(possibleOneEyeArtifactSamples > 0 ? 64d : 8d, sampleCount),
+        EyeContrastPercent = Metric(possibleOneEyeArtifactSamples > 0 ? 34d : 72d, sampleCount),
+        EyeSharpnessPercent = Metric(possibleOneEyeArtifactSamples > 0 ? 40d : 78d, sampleCount)
+    };
+    var samples = Enumerable.Range(0, sampleCount)
+        .Select(index => new PersonalFaceMeasurementSample
+        {
+            CapturedAtUtc = now.AddSeconds(index),
+            SampleWeight = 1d,
+            TrackingConfidence = 0.92d,
+            EyeConfidence = possibleOneEyeArtifactSamples > 0 ? 0.52d : 0.90d,
+            MouthConfidence = 0.90d,
+            OverallQualityPercent = possibleOneEyeArtifactSamples > 0 ? 72d : 88d,
+            EyeQualityPercent = possibleOneEyeArtifactSamples > 0 ? 56d : 88d,
+            MouthQualityPercent = 88d,
+            CaptureQualityLabel = possibleOneEyeArtifactSamples > 0 ? "review" : "avatar-grade",
+            CaptureQualityScorePercent = possibleOneEyeArtifactSamples > 0 ? 72d : 88d,
+            CaptureQualityCanCollect = true,
+            CaptureQualityAvatarGrade = possibleOneEyeArtifactSamples == 0,
+            CaptureQualityReason = "synthetic eye aperture reliability audit",
+            CaptureQualityCameraModeScorePercent = 90d,
+            CaptureQualityFaceScaleScorePercent = 90d,
+            CaptureQualityEyeScorePercent = possibleOneEyeArtifactSamples > 0 ? 56d : 88d,
+            CaptureQualityMouthScorePercent = 88d,
+            CaptureQualityStabilityScorePercent = 90d,
+            CaptureQualityGlassesScorePercent = possibleOneEyeArtifactSamples > 0 ? 45d : 84d,
+            CaptureQualityStorageScorePercent = 100d,
+            FaceReliabilityPercent = 92d,
+            FaceContinuityPercent = 90d,
+            EyeReliabilityPercent = possibleOneEyeArtifactSamples > 0 ? 55d : 90d,
+            MouthReliabilityPercent = 90d,
+            AverageEyeOpeningRatio = 0.25d,
+            MouthOpeningRatio = 0.08d,
+            JawDroopRatio = 0.04d,
+            MediaPipeAverageEyeBlinkPercent = 18d,
+            MediaPipeJawOpenPercent = 8d,
+            MediaPipeMouthClosePercent = 88d,
+            FaceAspectRatio = 1.45d,
+            EyeMidlineXToFaceWidth = 0.50d,
+            MouthCenterXToFaceWidth = 0.50d,
+            EyeToMouthXOffsetToFaceWidth = 0.02d,
+            InterEyeDistanceToFaceWidth = 0.40d,
+            LeftEyeWidthToFaceWidth = 0.14d,
+            RightEyeWidthToFaceWidth = 0.14d,
+            MouthWidthToFaceWidth = 0.28d,
+            EyeMidlineYToFaceHeight = 0.36d,
+            MouthCenterYToFaceHeight = 0.66d,
+            EyeToMouthYDistanceToFaceHeight = 0.30d,
+            IdentityMeasurementAvailable = true,
+            PossibleOneEyeArtifact = index < possibleOneEyeArtifactSamples,
+            EyeArtifactSuppressed = index < eyeArtifactSuppressedSamples,
+            LeftEyeReconstructed = index < leftEyeReconstructedSamples,
+            RightEyeReconstructed = index < rightEyeReconstructedSamples
+        })
+        .ToList();
+    return new PersonalFaceCorpusReadinessBuilder().Build(model, new PersonalFaceMotionModel(), samples, measurementJournalBytes: 0L);
+}
+
+static void RunMouthVerticalAnchorAuditSmoke()
+{
+    var goodReadiness = BuildSyntheticMouthAnchorReadiness(
+        mouthCenterYToFaceHeight: 0.70d,
+        eyeToMouthYDistanceToFaceHeight: 0.34d,
+        suspiciousEverySample: false);
+    Require(
+        goodReadiness.MouthVerticalAnchorHealthPercent >= 90d,
+        $"clean mouth vertical anchor audit scored too low: {goodReadiness.MouthVerticalAnchorHealthPercent}");
+    Require(
+        goodReadiness.MouthVerticalAnchorSuspiciousSampleRate is 0d,
+        $"clean mouth vertical anchor audit reported suspicious samples: {goodReadiness.MouthVerticalAnchorSuspiciousSampleRate}");
+
+    var underNoseReadiness = BuildSyntheticMouthAnchorReadiness(
+        mouthCenterYToFaceHeight: 0.50d,
+        eyeToMouthYDistanceToFaceHeight: 0.14d,
+        suspiciousEverySample: true);
+    Require(
+        underNoseReadiness.MouthVerticalAnchorHealthPercent < 60d,
+        $"under-nose mouth vertical anchor audit did not lower health enough: {underNoseReadiness.MouthVerticalAnchorHealthPercent}");
+    Require(
+        underNoseReadiness.MouthVerticalAnchorSuspiciousSampleRate >= 0.99d,
+        $"under-nose mouth vertical anchor audit did not count suspicious samples: {underNoseReadiness.MouthVerticalAnchorSuspiciousSampleRate}");
+    Require(
+        underNoseReadiness.DataAuditFindings.Any(static finding =>
+            finding.Contains("mouth vertical anchor", StringComparison.OrdinalIgnoreCase)
+            && finding.Contains("under the nose", StringComparison.OrdinalIgnoreCase)),
+        "under-nose mouth vertical anchor audit did not explain the suspicious lip lock");
+}
+
+static PersonalFaceCorpusReadiness BuildSyntheticMouthAnchorReadiness(
+    double mouthCenterYToFaceHeight,
+    double eyeToMouthYDistanceToFaceHeight,
+    bool suspiciousEverySample)
+{
+    const int sampleCount = 24;
+    var now = DateTime.UtcNow;
+    var model = new PersonalFaceModel
+    {
+        CreatedAtUtc = now,
+        UpdatedAtUtc = now.AddSeconds(sampleCount),
+        ObservedSamples = sampleCount,
+        AcceptedSamples = sampleCount,
+        AcceptedSampleWeight = sampleCount,
+        AverageFaceReliabilityPercent = 92d,
+        AverageFaceContinuityPercent = 90d,
+        AverageEyeReliabilityPercent = 90d,
+        AverageMouthReliabilityPercent = 90d,
+        IdentitySignatureSamples = sampleCount,
+        LearningStability = new PersonalFaceLearningStability
+        {
+            AnchorPercent = 74d,
+            AnchorStatus = "synthetic",
+            MaximumNextSampleInfluencePercent = 4d,
+            MaximumEventLikeNextSampleInfluencePercent = 2d
+        },
+        FaceCenterX = Metric(0.50d, sampleCount),
+        FaceCenterY = Metric(0.50d, sampleCount),
+        FaceWidth = Metric(0.40d, sampleCount),
+        FaceHeight = Metric(0.62d, sampleCount),
+        HeadYawDegrees = Metric(0d, sampleCount),
+        HeadPitchDegrees = Metric(0d, sampleCount),
+        HeadRollDegrees = Metric(0d, sampleCount),
+        AverageEyeOpeningRatio = Metric(0.26d, sampleCount),
+        MouthOpeningRatio = Metric(0.08d, sampleCount),
+        JawDroopRatio = Metric(0.18d, sampleCount),
+        FaceAspectRatio = Metric(1.45d, sampleCount),
+        EyeMidlineXToFaceWidth = Metric(0.50d, sampleCount),
+        MouthCenterXToFaceWidth = Metric(0.50d, sampleCount),
+        EyeToMouthXOffsetToFaceWidth = Metric(0.02d, sampleCount),
+        InterEyeDistanceToFaceWidth = Metric(0.40d, sampleCount),
+        LeftEyeWidthToFaceWidth = Metric(0.14d, sampleCount),
+        RightEyeWidthToFaceWidth = Metric(0.14d, sampleCount),
+        MouthWidthToFaceWidth = Metric(0.28d, sampleCount),
+        EyeMidlineYToFaceHeight = Metric(0.36d, sampleCount),
+        MouthCenterYToFaceHeight = Metric(mouthCenterYToFaceHeight, sampleCount),
+        EyeToMouthYDistanceToFaceHeight = Metric(eyeToMouthYDistanceToFaceHeight, sampleCount)
+    };
+    var samples = Enumerable.Range(0, sampleCount)
+        .Select(index => new PersonalFaceMeasurementSample
+        {
+            CapturedAtUtc = now.AddSeconds(index),
+            SampleWeight = 1d,
+            TrackingConfidence = 0.92d,
+            EyeConfidence = 0.90d,
+            MouthConfidence = 0.90d,
+            OverallQualityPercent = 88d,
+            EyeQualityPercent = 88d,
+            MouthQualityPercent = 88d,
+            CaptureQualityLabel = "avatar-grade",
+            CaptureQualityScorePercent = 88d,
+            CaptureQualityCanCollect = true,
+            CaptureQualityAvatarGrade = true,
+            CaptureQualityReason = "synthetic mouth anchor audit",
+            CaptureQualityCameraModeScorePercent = 90d,
+            CaptureQualityFaceScaleScorePercent = 90d,
+            CaptureQualityEyeScorePercent = 88d,
+            CaptureQualityMouthScorePercent = 88d,
+            CaptureQualityStabilityScorePercent = 90d,
+            CaptureQualityGlassesScorePercent = 82d,
+            CaptureQualityStorageScorePercent = 100d,
+            FaceReliabilityPercent = 92d,
+            FaceContinuityPercent = 90d,
+            EyeReliabilityPercent = 90d,
+            MouthReliabilityPercent = 90d,
+            AverageEyeOpeningRatio = 0.26d,
+            MouthOpeningRatio = 0.08d,
+            JawDroopRatio = 0.18d,
+            MediaPipeJawOpenPercent = suspiciousEverySample ? 7d : 8d,
+            MediaPipeMouthClosePercent = suspiciousEverySample ? 91d : 90d,
+            FaceAspectRatio = 1.45d,
+            EyeMidlineXToFaceWidth = 0.50d,
+            MouthCenterXToFaceWidth = 0.50d,
+            EyeToMouthXOffsetToFaceWidth = 0.02d,
+            InterEyeDistanceToFaceWidth = 0.40d,
+            LeftEyeWidthToFaceWidth = 0.14d,
+            RightEyeWidthToFaceWidth = 0.14d,
+            MouthWidthToFaceWidth = 0.28d,
+            EyeMidlineYToFaceHeight = 0.36d,
+            MouthCenterYToFaceHeight = mouthCenterYToFaceHeight,
+            EyeToMouthYDistanceToFaceHeight = eyeToMouthYDistanceToFaceHeight,
+            IdentityMeasurementAvailable = true
+        })
+        .ToList();
+    return new PersonalFaceCorpusReadinessBuilder().Build(model, new PersonalFaceMotionModel(), samples, measurementJournalBytes: 0L);
+}
+
+static PersonalFaceCorpusReadiness BuildSyntheticIdentitySessionReadiness(int outlierFrames, int normalFrames)
+{
+    var sampleCount = Math.Max(1, outlierFrames + normalFrames);
+    var now = DateTime.UtcNow;
+    var model = new PersonalFaceModel
+    {
+        CreatedAtUtc = now,
+        UpdatedAtUtc = now.AddSeconds(sampleCount),
+        ObservedSamples = 160,
+        AcceptedSamples = 160,
+        AcceptedSampleWeight = 150d,
+        AverageFaceReliabilityPercent = 92d,
+        AverageFaceContinuityPercent = 90d,
+        AverageEyeReliabilityPercent = 90d,
+        AverageMouthReliabilityPercent = 90d,
+        IdentitySignatureSamples = 150,
+        LearningStability = new PersonalFaceLearningStability
+        {
+            AcceptedSampleWeight = 150d,
+            MinimumTrackedDistributionWeight = 140d,
+            AnchorTargetWeight = 180d,
+            AnchorPercent = 83d,
+            AnchorStatus = "warming",
+            MaximumNextSampleInfluencePercent = 0.9d,
+            MaximumEventLikeNextSampleInfluencePercent = 0.4d
+        },
+        FaceCenterX = Metric(0.50d, 150),
+        FaceCenterY = Metric(0.50d, 150),
+        FaceWidth = Metric(0.40d, 150),
+        FaceHeight = Metric(0.62d, 150),
+        HeadYawDegrees = Metric(0d, 150, 8d),
+        HeadPitchDegrees = Metric(0d, 150, 5d),
+        HeadRollDegrees = Metric(0d, 150, 4d),
+        AverageEyeOpeningRatio = Metric(0.26d, 150),
+        EyeAgreementPercent = Metric(91d, 150, 3d),
+        MouthOpeningRatio = Metric(0.08d, 150),
+        JawDroopRatio = Metric(0.12d, 150),
+        FaceAspectRatio = Metric(1.45d, 150),
+        EyeMidlineXToFaceWidth = Metric(0.50d, 150),
+        MouthCenterXToFaceWidth = Metric(0.50d, 150),
+        EyeToMouthXOffsetToFaceWidth = Metric(0.02d, 150),
+        InterEyeDistanceToFaceWidth = Metric(0.40d, 150),
+        LeftEyeWidthToFaceWidth = Metric(0.14d, 150),
+        RightEyeWidthToFaceWidth = Metric(0.14d, 150),
+        MouthWidthToFaceWidth = Metric(0.28d, 150),
+        EyeMidlineYToFaceHeight = Metric(0.36d, 150),
+        MouthCenterYToFaceHeight = Metric(0.66d, 150),
+        EyeToMouthYDistanceToFaceHeight = Metric(0.30d, 150)
+    };
+
+    var samples = Enumerable.Range(0, sampleCount)
+        .Select(index =>
+        {
+            var outlier = index < outlierFrames;
+            return new PersonalFaceMeasurementSample
+            {
+                CapturedAtUtc = now.AddSeconds(index),
+                SampleWeight = 1d,
+                TrackingConfidence = 0.90d,
+                EyeConfidence = 0.88d,
+                MouthConfidence = 0.88d,
+                OverallQualityPercent = 88d,
+                EyeQualityPercent = 88d,
+                MouthQualityPercent = 88d,
+                CaptureQualityLabel = "avatar-grade",
+                CaptureQualityScorePercent = 88d,
+                CaptureQualityCanCollect = true,
+                CaptureQualityAvatarGrade = true,
+                CaptureQualityReason = "synthetic identity-session audit",
+                CaptureQualityCameraModeScorePercent = 92d,
+                CaptureQualityFaceScaleScorePercent = 90d,
+                CaptureQualityEyeScorePercent = 88d,
+                CaptureQualityMouthScorePercent = 88d,
+                CaptureQualityStabilityScorePercent = 90d,
+                CaptureQualityGlassesScorePercent = 84d,
+                CaptureQualityStorageScorePercent = 100d,
+                FaceReliabilityPercent = 92d,
+                FaceContinuityPercent = 90d,
+                EyeReliabilityPercent = 90d,
+                MouthReliabilityPercent = 90d,
+                AverageEyeOpeningRatio = 0.26d,
+                MouthOpeningRatio = 0.08d,
+                JawDroopRatio = 0.12d,
+                FaceAspectRatio = outlier ? 1.78d : 1.45d,
+                EyeMidlineXToFaceWidth = outlier ? 0.64d : 0.50d,
+                MouthCenterXToFaceWidth = outlier ? 0.34d : 0.50d,
+                EyeToMouthXOffsetToFaceWidth = outlier ? 0.17d : 0.02d,
+                InterEyeDistanceToFaceWidth = outlier ? 0.24d : 0.40d,
+                LeftEyeWidthToFaceWidth = outlier ? 0.08d : 0.14d,
+                RightEyeWidthToFaceWidth = outlier ? 0.08d : 0.14d,
+                MouthWidthToFaceWidth = outlier ? 0.46d : 0.28d,
+                EyeMidlineYToFaceHeight = outlier ? 0.24d : 0.36d,
+                MouthCenterYToFaceHeight = outlier ? 0.78d : 0.66d,
+                EyeToMouthYDistanceToFaceHeight = outlier ? 0.54d : 0.30d,
+                IdentityMeasurementAvailable = true,
+                IdentityAutoGateReady = true,
+                IdentityWarmupStrongMismatchGateReady = true,
+                IdentityConfidencePercent = outlier ? 18d : 92d,
+                IdentityComparedFeatureCount = 10,
+                IdentityOutlierFeatureCount = outlier ? 7 : 0
+            };
+        })
+        .ToList();
+
+    return new PersonalFaceCorpusReadinessBuilder().Build(model, new PersonalFaceMotionModel(), samples, measurementJournalBytes: 0L);
+}
+
+static PersonalMetricDistribution Metric(double value, int sampleCount, double spread = 0.01d)
+{
+    return new PersonalMetricDistribution
+    {
+        SampleCount = sampleCount,
+        TotalWeight = sampleCount,
+        Average = value,
+        Minimum = value - spread,
+        Maximum = value + spread,
+        StandardDeviation = spread / 2d,
+        ExponentialMovingAverage = value,
+        NormalLow = value - spread * 2d,
+        NormalHigh = value + spread * 2d
+    };
+}
+
+static void RunPoseExplainedFeatureMotionAuditSmoke()
+{
+    var strongPoseReadiness = BuildSyntheticPoseExplainedFeatureReadiness(
+        yawRangeDegrees: 58d,
+        pitchRangeDegrees: 20d,
+        rollRangeDegrees: 16d,
+        featureRange: 0.42d);
+    Require(
+        strongPoseReadiness.PoseExplainedFeatureMotionHealthPercent >= 80d,
+        $"pose-explained feature audit penalized a large head turn too much: {strongPoseReadiness.PoseExplainedFeatureMotionHealthPercent}");
+    Require(
+        strongPoseReadiness.DataAuditFindings.All(static finding => !finding.Contains("pose-explained feature motion", StringComparison.OrdinalIgnoreCase)),
+        "pose-explained feature audit produced a sliding-feature finding for a strongly posed synthetic turn");
+
+    var weakPoseReadiness = BuildSyntheticPoseExplainedFeatureReadiness(
+        yawRangeDegrees: 4d,
+        pitchRangeDegrees: 3d,
+        rollRangeDegrees: 3d,
+        featureRange: 0.42d);
+    Require(
+        weakPoseReadiness.PoseExplainedFeatureMotionHealthPercent < 60d,
+        $"pose-explained feature audit did not penalize feature drift with almost no head pose: {weakPoseReadiness.PoseExplainedFeatureMotionHealthPercent}");
+    Require(
+        weakPoseReadiness.DataAuditFindings.Any(static finding =>
+            finding.Contains("pose-explained feature motion", StringComparison.OrdinalIgnoreCase)
+            && finding.Contains("sliding on the head", StringComparison.OrdinalIgnoreCase)),
+        "pose-explained feature audit did not explain the sliding-feature risk");
+}
+
+static PersonalFaceCorpusReadiness BuildSyntheticPoseExplainedFeatureReadiness(
+    double yawRangeDegrees,
+    double pitchRangeDegrees,
+    double rollRangeDegrees,
+    double featureRange)
+{
+    const int sampleCount = 120;
+    var spread = featureRange / 2d;
+    var now = DateTime.UtcNow;
+    var model = new PersonalFaceModel
+    {
+        CreatedAtUtc = now,
+        UpdatedAtUtc = now.AddSeconds(sampleCount),
+        ObservedSamples = sampleCount,
+        AcceptedSamples = sampleCount,
+        AcceptedSampleWeight = sampleCount,
+        AverageFaceReliabilityPercent = 92d,
+        AverageFaceContinuityPercent = 90d,
+        AverageEyeReliabilityPercent = 90d,
+        AverageMouthReliabilityPercent = 90d,
+        IdentitySignatureSamples = sampleCount,
+        LearningStability = new PersonalFaceLearningStability
+        {
+            AnchorPercent = 80d,
+            AnchorStatus = "synthetic",
+            MaximumNextSampleInfluencePercent = 2d,
+            MaximumEventLikeNextSampleInfluencePercent = 1d
+        },
+        FaceCenterX = Metric(0.50d, sampleCount),
+        FaceCenterY = Metric(0.50d, sampleCount),
+        FaceWidth = Metric(0.40d, sampleCount),
+        FaceHeight = Metric(0.62d, sampleCount),
+        HeadYawDegrees = Metric(0d, sampleCount, yawRangeDegrees / 2d),
+        HeadPitchDegrees = Metric(0d, sampleCount, pitchRangeDegrees / 2d),
+        HeadRollDegrees = Metric(0d, sampleCount, rollRangeDegrees / 2d),
+        AverageEyeOpeningRatio = Metric(0.26d, sampleCount),
+        MouthOpeningRatio = Metric(0.08d, sampleCount),
+        JawDroopRatio = Metric(0.18d, sampleCount),
+        FaceAspectRatio = Metric(1.45d, sampleCount),
+        EyeMidlineXToFaceWidth = Metric(0.50d, sampleCount, spread),
+        MouthCenterXToFaceWidth = Metric(0.50d, sampleCount, spread * 0.72d),
+        EyeToMouthXOffsetToFaceWidth = Metric(0.03d, sampleCount, spread * 0.38d),
+        InterEyeDistanceToFaceWidth = Metric(0.40d, sampleCount, spread * 0.58d),
+        LeftEyeWidthToFaceWidth = Metric(0.14d, sampleCount),
+        RightEyeWidthToFaceWidth = Metric(0.14d, sampleCount),
+        MouthWidthToFaceWidth = Metric(0.28d, sampleCount, spread * 0.44d),
+        EyeMidlineYToFaceHeight = Metric(0.36d, sampleCount),
+        MouthCenterYToFaceHeight = Metric(0.70d, sampleCount),
+        EyeToMouthYDistanceToFaceHeight = Metric(0.34d, sampleCount, spread * 0.24d)
+    };
+
+    return new PersonalFaceCorpusReadinessBuilder().Build(model, new PersonalFaceMotionModel(), [], measurementJournalBytes: 0L);
+}
+
+static bool TryGetOption(IReadOnlyList<string> args, string optionName, out string value)
+{
+    for (var index = 0; index < args.Count - 1; index++)
+    {
+        if (string.Equals(args[index], optionName, StringComparison.OrdinalIgnoreCase))
+        {
+            value = args[index + 1];
+            return !string.IsNullOrWhiteSpace(value);
+        }
+    }
+
+    value = "";
+    return false;
+}
+
+static string FormatOptional(double? value)
+{
+    return value is double number ? number.ToString("0.###") : "";
+}
+
+static string FormatRate(double? value)
+{
+    return value is double number ? number.ToString("P0") : "";
+}
 
 static void RunApertureSmoke()
 {
@@ -416,6 +1284,37 @@ static void RunApertureSmoke()
     Require(
         fallbackGuardFalseOpen.LeftEyeReconstructed && fallbackGuardFalseOpen.RightEyeReconstructed,
         "low-fidelity fallback eye-opening guard did not expose reconstruction flags");
+
+    var denseDirectReconstructor = new FaceLandmarkTemporalReconstructor();
+    var denseDirectStartedAt = DateTime.UtcNow.AddSeconds(8);
+    var denseDirectOpen = denseDirectReconstructor.Update(CreateSyntheticLandmarkFrame(
+        denseDirectStartedAt,
+        leftEyeRatio: 0.20d,
+        rightEyeRatio: 0.20d,
+        mouthRatio: 0.06d,
+        eyeConfidence: 0.90d,
+        mouthConfidence: 0.72d,
+        source: "MediaPipe Face Landmarker sidecar direct dense eye baseline",
+        eyeBlinkLeftScore: 0.08d,
+        eyeBlinkRightScore: 0.08d));
+    var denseDirectWider = denseDirectReconstructor.Update(CreateSyntheticLandmarkFrame(
+        denseDirectStartedAt.AddSeconds(0.20d),
+        leftEyeRatio: 0.42d,
+        rightEyeRatio: 0.42d,
+        mouthRatio: 0.06d,
+        eyeConfidence: 0.90d,
+        mouthConfidence: 0.72d,
+        source: "MediaPipe Face Landmarker sidecar direct dense eye quick movement",
+        eyeBlinkLeftScore: 0.04d,
+        eyeBlinkRightScore: 0.04d));
+    Require(
+        CalculateContourOpeningRatio(denseDirectOpen.LeftEyeContour) is double denseDirectOpenEye
+        && CalculateContourOpeningRatio(denseDirectWider.LeftEyeContour) is double denseDirectWiderEye
+        && denseDirectWiderEye > denseDirectOpenEye + 0.15d,
+        $"high-confidence dense direct eye opening was incorrectly rate-limited: open={CalculateContourOpeningRatio(denseDirectOpen.LeftEyeContour)}, wider={CalculateContourOpeningRatio(denseDirectWider.LeftEyeContour)}");
+    Require(
+        !denseDirectWider.LeftEyeReconstructed && !denseDirectWider.RightEyeReconstructed,
+        "high-confidence dense direct eye movement was incorrectly labeled as reconstructed");
 
     var blendshapeGuidedReconstructor = new FaceLandmarkTemporalReconstructor();
     var blendshapeOpenFrame = blendshapeGuidedReconstructor.Update(CreateSyntheticLandmarkFrame(
@@ -814,6 +1713,34 @@ static void RunApertureSmoke()
     Require(oneEyeArtifact.RawEyeAsymmetryPercent is > 55d, $"one-eye glare artifact asymmetry was too low: {oneEyeArtifact.RawEyeAsymmetryPercent}");
     Require(oneEyeArtifact.EyeMeasurementQualityPercent < 60d, $"one-eye glare artifact did not reduce eye quality: {oneEyeArtifact.EyeMeasurementQualityPercent}");
 
+    var directDenseAsymmetry = new FaceLandmarkMetricCalculator().Update(new FaceLandmarkFrame
+    {
+        HasFace = true,
+        CapturedAtUtc = DateTime.UtcNow,
+        Source = "MediaPipe Face Landmarker sidecar clean dense one-eye closure",
+        TrackingConfidence = 0.92d,
+        EyeConfidence = 0.90d,
+        MouthConfidence = 0.70d,
+        EyeImageQualityAvailable = true,
+        EyeGlarePercent = 0d,
+        EyeContrastPercent = 82d,
+        EyeSharpnessPercent = 76d,
+        LeftEyeContour = CreateNormalizedOval(0.42d, 0.39d, 0.055d, 0.055d * 0.52d),
+        RightEyeContour = CreateNormalizedOval(0.58d, 0.39d, 0.055d, 0.055d * 0.08d),
+        InnerLipContour = Normalize(closedMouthEstimate.Contour, 180, 90),
+        BlendshapeScores = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["eyeBlinkLeft"] = 0.22d,
+            ["eyeBlinkRight"] = 0.78d
+        }
+    });
+    Require(
+        directDenseAsymmetry.RawEyeAsymmetryPercent is > 85d,
+        $"clean dense one-eye closure did not create strong asymmetry evidence: {directDenseAsymmetry.RawEyeAsymmetryPercent}");
+    Require(
+        !directDenseAsymmetry.PossibleOneEyeArtifact,
+        "clean high-confidence dense one-eye closure was incorrectly labeled as an artifact");
+
     var suppressedSideAngleArtifact = new FaceLandmarkMetricCalculator().Update(new FaceLandmarkFrame
     {
         HasFace = true,
@@ -901,17 +1828,17 @@ static void RunApertureSmoke()
         levelMetrics.RawAverageEyeOpeningRatio is double levelEye
         && rolledMetrics.RawAverageEyeOpeningRatio is double rolledEye
         && Math.Abs(levelEye - rolledEye) < 0.018d,
-        $"roll-aware eye aperture measurement drifted under head roll: level={levelMetrics.RawAverageEyeOpeningRatio}, rolled={rolledMetrics.RawAverageEyeOpeningRatio}");
+        $"C-axis-aware eye aperture measurement drifted under C-axis head tilt: level={levelMetrics.RawAverageEyeOpeningRatio}, tilted={rolledMetrics.RawAverageEyeOpeningRatio}");
     Require(
         levelMetrics.RawMouthOpeningRatio is double levelMouth
         && rolledMetrics.RawMouthOpeningRatio is double rolledMouth
         && Math.Abs(levelMouth - rolledMouth) < 0.025d,
-        $"roll-aware mouth aperture measurement drifted under head roll: level={levelMetrics.RawMouthOpeningRatio}, rolled={rolledMetrics.RawMouthOpeningRatio}");
+        $"C-axis-aware mouth aperture measurement drifted under C-axis head tilt: level={levelMetrics.RawMouthOpeningRatio}, tilted={rolledMetrics.RawMouthOpeningRatio}");
     Require(
         levelMetrics.RawJawDroopRatio is double levelJawDroop
         && rolledMetrics.RawJawDroopRatio is double rolledJawDroop
         && Math.Abs(levelJawDroop - rolledJawDroop) < 0.035d,
-        $"roll-aware jaw droop measurement drifted under head roll: level={levelMetrics.RawJawDroopRatio}, rolled={rolledMetrics.RawJawDroopRatio}");
+        $"C-axis-aware jaw droop measurement drifted under C-axis head tilt: level={levelMetrics.RawJawDroopRatio}, tilted={rolledMetrics.RawJawDroopRatio}");
 
     var cleanEyeContour = levelFacemarkFrame.LeftEyeContour;
     var noisyEyeContour = cleanEyeContour.ToList();
@@ -1475,6 +2402,10 @@ static void RunPersonalFaceModelSmoke()
     Require(model.MouthOpeningRatio.Average is > 0.04d and < 0.12d, $"personal model mouth baseline was not plausible: {model.MouthOpeningRatio.Average}");
     Require(model.FaceCenterX.SampleCount >= 10 && model.FaceWidth.SampleCount >= 10, "personal model did not learn face position/scale distribution");
     Require(model.LearningStability.AcceptedSampleWeight > 0d, "personal model learning stability did not record accepted sample weight");
+    Require(model.LearningStability.MinimumTrackedDistributionWeight > 0d, "personal model learning stability did not record weakest tracked distribution weight");
+    Require(
+        model.LearningStability.MinimumTrackedDistributionWeight <= model.LearningStability.AcceptedSampleWeight,
+        "personal model weakest tracked distribution weight exceeded accepted sample weight");
     Require(model.LearningStability.MaximumNextSampleInfluencePercent is > 0d and < 12d, $"personal model next-sample influence is not bounded tightly enough: {model.LearningStability.MaximumNextSampleInfluencePercent}");
     Require(
         model.LearningStability.MaximumEventLikeNextSampleInfluencePercent < model.LearningStability.MaximumNextSampleInfluencePercent,
@@ -1491,6 +2422,89 @@ static void RunPersonalFaceModelSmoke()
     Require(neutralPose is { SampleCount: >= 10, PrimaryNeutralReference: true }, "personal model did not learn a front-neutral pose bucket");
     var frontNeutralPose = neutralPose ?? throw new InvalidOperationException("front-neutral pose bucket missing after assertion");
     Require(frontNeutralPose.FaceAspectRatio.SampleCount >= 10, "front-neutral pose bucket did not learn identity proportions");
+
+    var artifactBuilder = new PersonalFaceModelBuilder();
+    artifactBuilder.LoadModel(model);
+    var artifactFrame = CreateSyntheticLandmarkFrame(
+        startedAt.AddSeconds(awakeSampleCount * 0.5d + 1d),
+        leftEyeRatio: 0.62d,
+        rightEyeRatio: 0.18d,
+        mouthRatio: 0.08d,
+        eyeConfidence: 0.82d,
+        mouthConfidence: 0.82d,
+        source: "personal model eye artifact smoke",
+        eyeArtifactSuppressed: true);
+    var artifactMetrics = new FaceLandmarkMetricCalculator().Update(artifactFrame);
+    var artifactUpdate = artifactBuilder.Update(
+        artifactFrame,
+        artifactMetrics,
+        lastStability,
+        cueAnalysis: null,
+        trendAnalysis: null,
+        allowEventLikeMeasurements: true);
+    Require(!artifactUpdate.Accepted, "personal model accepted an eye-artifact frame into avatar learning");
+    Require(
+        artifactUpdate.RejectionKind == PersonalFaceModelRejectionKind.TrackingArtifact,
+        $"personal model rejected eye-artifact frame with the wrong reason: {artifactUpdate.RejectionKind}, {artifactUpdate.Reason}");
+    Require(
+        artifactUpdate.Model.TrackingArtifactRejectedSamples == model.TrackingArtifactRejectedSamples + 1,
+        "personal model did not count eye-artifact rejected samples separately");
+    Require(
+        artifactUpdate.Model.AcceptedSamples == model.AcceptedSamples,
+        "eye-artifact rejection changed accepted sample count");
+    Require(
+        artifactUpdate.Model.IdentitySignatureSamples == model.IdentitySignatureSamples,
+        "eye-artifact rejection changed identity signature sample count");
+    Require(
+        artifactUpdate.Model.PoseBuckets.First(static bucket => bucket.BucketId == PersonalFacePoseBuckets.FrontNeutral).FaceAspectRatio.SampleCount
+        == frontNeutralPose.FaceAspectRatio.SampleCount,
+        "eye-artifact rejection updated front-neutral identity geometry");
+
+    var geometryArtifactBuilder = new PersonalFaceModelBuilder();
+    geometryArtifactBuilder.LoadModel(model);
+    var geometryArtifactFrame = CreateSyntheticLandmarkFrame(
+        startedAt.AddSeconds(awakeSampleCount * 0.5d + 1.5d),
+        leftEyeRatio: 0.27d,
+        rightEyeRatio: 0.27d,
+        mouthRatio: 0.07d,
+        eyeConfidence: 0.94d,
+        mouthConfidence: 0.92d,
+        source: "personal model silent geometry artifact smoke",
+        eyeCenterOffset: 0.13d,
+        leftEyeHalfWidth: 0.018d,
+        rightEyeHalfWidth: 0.086d,
+        mouthHalfWidth: 0.030d,
+        mouthCenterX: 0.61d,
+        mouthCenterY: 0.54d);
+    var geometryArtifactMetrics = new FaceLandmarkMetricCalculator().Update(geometryArtifactFrame);
+    var geometryArtifactUpdate = geometryArtifactBuilder.Update(
+        geometryArtifactFrame,
+        geometryArtifactMetrics,
+        lastStability,
+        cueAnalysis: null,
+        trendAnalysis: null,
+        allowEventLikeMeasurements: true);
+    Require(!geometryArtifactUpdate.Accepted, "personal model accepted a silent feature-geometry artifact into avatar learning");
+    Require(
+        geometryArtifactUpdate.RejectionKind == PersonalFaceModelRejectionKind.TrackingArtifact,
+        $"personal model rejected silent geometry artifact with the wrong reason: {geometryArtifactUpdate.RejectionKind}, {geometryArtifactUpdate.Reason}");
+    Require(
+        geometryArtifactUpdate.IdentityAnalysis is { OutlierFeatureCount: >= 4, ConfidencePercent: < 45d },
+        $"silent geometry artifact did not report enough identity outliers: {geometryArtifactUpdate.IdentityAnalysis?.Status}");
+    Require(
+        geometryArtifactUpdate.Reason.Contains("feature geometry", StringComparison.OrdinalIgnoreCase),
+        $"silent geometry artifact rejection reason did not explain the geometry problem: {geometryArtifactUpdate.Reason}");
+    Require(
+        geometryArtifactUpdate.Model.TrackingArtifactRejectedSamples == model.TrackingArtifactRejectedSamples + 1,
+        "personal model did not count silent geometry artifact rejected samples separately");
+    Require(
+        geometryArtifactUpdate.Model.AcceptedSamples == model.AcceptedSamples,
+        "silent geometry artifact rejection changed accepted sample count");
+    Require(
+        geometryArtifactUpdate.Model.PoseBuckets.First(static bucket => bucket.BucketId == PersonalFacePoseBuckets.FrontNeutral).FaceAspectRatio.SampleCount
+        == frontNeutralPose.FaceAspectRatio.SampleCount,
+        "silent geometry artifact rejection updated front-neutral identity geometry");
+
     Require(!string.IsNullOrWhiteSpace(lastJournalPath) && File.Exists(lastJournalPath), "personal measurement journal did not write accepted measurement samples");
     var journalText = File.ReadAllText(lastJournalPath);
     Require(journalText.Contains("SubjectId", StringComparison.Ordinal), "personal measurement journal did not include subject id");
@@ -1498,6 +2512,8 @@ static void RunPersonalFaceModelSmoke()
     Require(journalText.Contains("FaceAspectRatio", StringComparison.Ordinal), "personal measurement journal did not include identity signature measurements");
     Require(journalText.Contains("SampleWeight", StringComparison.Ordinal), "personal measurement journal did not include sample weights");
     Require(journalText.Contains("PoseBucketIds", StringComparison.Ordinal), "personal measurement journal did not include compact pose bucket ids");
+    Require(journalText.Contains("IdentityConfidencePercent", StringComparison.Ordinal), "personal measurement journal did not include compact identity confidence");
+    Require(journalText.Contains("IdentityOutlierFeatureCount", StringComparison.Ordinal), "personal measurement journal did not include identity outlier summary");
     Require(journalText.Contains("CaptureQualityLabel", StringComparison.Ordinal), "personal measurement journal did not include capture quality label");
     Require(journalText.Contains("CaptureQualityScorePercent", StringComparison.Ordinal), "personal measurement journal did not include capture quality score");
     Require(!journalText.Contains("FaceContour", StringComparison.Ordinal) && !journalText.Contains("LeftEyeContour", StringComparison.Ordinal), "personal measurement journal stored raw contour data");
@@ -1542,6 +2558,41 @@ static void RunPersonalFaceModelSmoke()
         continuedUpdate.Model.PoseBuckets.First(static bucket => bucket.BucketId == PersonalFacePoseBuckets.FrontNeutral).SampleCount
         > resumedModel.PoseBuckets.First(static bucket => bucket.BucketId == PersonalFacePoseBuckets.FrontNeutral).SampleCount,
         "resumed personal face model did not continue pose bucket learning");
+
+    var outlierBuilder = new PersonalFaceModelBuilder();
+    outlierBuilder.LoadModel(model);
+    var outlierCalculator = new FaceLandmarkMetricCalculator();
+    var outlierFrame = CreateSyntheticLandmarkFrame(
+        startedAt.AddSeconds(awakeSampleCount * 0.5d + 2d),
+        leftEyeRatio: 0.58d,
+        rightEyeRatio: 0.58d,
+        mouthRatio: 0.34d,
+        eyeConfidence: 0.95d,
+        mouthConfidence: 0.95d,
+        source: "personal model deliberate outlier");
+    var outlierMetrics = outlierCalculator.Update(outlierFrame);
+    var outlierUpdate = outlierBuilder.Update(outlierFrame, outlierMetrics, lastStability, cueAnalysis: null, trendAnalysis: null);
+    Require(outlierUpdate.Accepted, $"personal model rejected deliberate bounded-drift outlier unexpectedly: {outlierUpdate.RejectionKind}, {outlierUpdate.Reason}");
+    RequireBoundedAverageMovement(
+        "eye opening",
+        model.AverageEyeOpeningRatio.Average,
+        outlierMetrics.AverageEyeOpeningRatio,
+        outlierUpdate.Model.AverageEyeOpeningRatio.Average,
+        model.LearningStability.MaximumNextSampleInfluencePercent);
+    RequireBoundedAverageMovement(
+        "mouth opening",
+        model.MouthOpeningRatio.Average,
+        outlierMetrics.MouthOpeningRatio,
+        outlierUpdate.Model.MouthOpeningRatio.Average,
+        model.LearningStability.MaximumNextSampleInfluencePercent);
+
+    resumedBuilder.Reset();
+    var resetModel = resumedBuilder.CurrentModel;
+    Require(resetModel.ObservedSamples == 0 && resetModel.AcceptedSamples == 0, "personal face model reset did not clear sample counts");
+    Require(resetModel.AverageEyeOpeningRatio.SampleCount == 0, "personal face model reset did not clear eye distribution");
+    Require(
+        resetModel.PoseBuckets.All(static bucket => bucket.SampleCount == 0),
+        "personal face model reset did not clear pose bucket samples");
 
     var lowCameraModeQuality = captureQualityAnalyzer.Analyze(new PersonalFaceCaptureQualityInput
     {
@@ -1593,7 +2644,20 @@ static void RunPersonalFaceModelSmoke()
     Require(readiness.EyeBehindGlassesTrustPercent > 0d, "personal face corpus readiness did not include eye-behind-glasses trust");
     Require(readiness.MouthJawTrustPercent > 0d, "personal face corpus readiness did not include mouth/jaw trust");
     Require(readiness.DirectFeatureMeasurementTrustPercent > 0d, "personal face corpus readiness did not include direct feature trust");
+    Require(readiness.ApertureConsistencyHealthPercent > 0d, "personal face corpus readiness did not include aperture consistency health");
+    Require(readiness.EyeApertureReliabilityHealthPercent > 0d, "personal face corpus readiness did not include eye aperture reliability health");
+    Require(readiness.MouthVerticalAnchorHealthPercent > 0d, "personal face corpus readiness did not include mouth vertical anchor health");
     Require(readiness.LearningStabilityCoveragePercent > 0d, "personal face corpus readiness did not include learning stability coverage");
+    Require(readiness.XYZABCCoveragePercent >= 0d, "personal face corpus readiness did not include XYZABC coverage");
+    Require(readiness.DataAuditHealthPercent > 0d, "personal face corpus readiness did not include data audit health");
+    Require(readiness.PoseEstimationHealthPercent > 0d, "personal face corpus readiness did not include pose estimation audit health");
+    Require(readiness.PoseBucketConsistencyHealthPercent > 0d, "personal face corpus readiness did not include pose-bucket consistency health");
+    Require(readiness.SurfaceGeometryHealthPercent >= 0d, "personal face corpus readiness did not include surface geometry health");
+    Require(readiness.SurfaceGeometryPatchCount >= 0, $"personal face corpus readiness surface geometry patch count was invalid: {readiness.SurfaceGeometryPatchCount}");
+    Require(!string.IsNullOrWhiteSpace(readiness.SurfaceGeometryStatus), "personal face corpus readiness did not include surface geometry status");
+    Require(readiness.IdentitySessionHealthPercent > 0d, "personal face corpus readiness did not include identity-session health");
+    Require(!string.IsNullOrWhiteSpace(readiness.IdentitySessionAuditStage), "personal face corpus readiness did not include identity-session audit stage");
+    Require(!string.IsNullOrWhiteSpace(readiness.IdentitySessionAuditStatus), "personal face corpus readiness did not include identity-session audit status");
     Require(readiness.MaximumNextSampleInfluencePercent > 0d, "personal face corpus readiness did not include next-sample influence");
     Require(readiness.Warnings.Any(static warning => warning.Contains("weakly anchored", StringComparison.OrdinalIgnoreCase)), "early personal face corpus readiness did not warn about weak anchoring");
     Require(readiness.NextCaptureSuggestions.Any(static suggestion => suggestion.Contains("next-sample influence", StringComparison.OrdinalIgnoreCase)), "early personal face corpus readiness did not suggest reducing next-sample influence");
@@ -1611,14 +2675,38 @@ static void RunPersonalFaceModelSmoke()
     Require(readinessJson.Contains("IdentityCoveragePercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include identity coverage");
     Require(readinessJson.Contains("ContourShapeCoveragePercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include contour shape coverage");
     Require(readinessJson.Contains("DirectFeatureMeasurementTrustPercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include direct feature trust");
+    Require(readinessJson.Contains("ApertureConsistencyHealthPercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include aperture consistency health");
+    Require(readinessJson.Contains("EyeApertureReliabilityHealthPercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include eye aperture reliability health");
+    Require(readinessJson.Contains("PossibleOneEyeArtifactRate", StringComparison.Ordinal), "personal face corpus readiness JSON did not include possible one-eye artifact rate");
+    Require(readinessJson.Contains("MouthVerticalAnchorHealthPercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include mouth vertical anchor health");
     Require(readinessJson.Contains("LearningStabilityCoveragePercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include learning stability coverage");
+    Require(readinessJson.Contains("MinimumTrackedDistributionWeight", StringComparison.Ordinal), "personal face corpus readiness JSON did not include weakest tracked distribution weight");
     Require(readinessJson.Contains("CaptureQualityCoveragePercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include capture quality coverage");
+    Require(readinessJson.Contains("XYZABCCoveragePercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include XYZABC coverage");
+    Require(readinessJson.Contains("DataAuditHealthPercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include data audit health");
+    Require(readinessJson.Contains("PoseBucketConsistencyHealthPercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include pose-bucket consistency health");
+    Require(readinessJson.Contains("PoseAxisHealthPercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include pose-axis health");
+    Require(readinessJson.Contains("SurfaceGeometryHealthPercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include surface geometry health");
+    Require(readinessJson.Contains("SurfaceGeometryStatus", StringComparison.Ordinal), "personal face corpus readiness JSON did not include surface geometry status");
+    Require(readinessJson.Contains("IdentitySessionHealthPercent", StringComparison.Ordinal), "personal face corpus readiness JSON did not include identity-session health");
+    Require(readinessJson.Contains("IdentitySessionAuditStage", StringComparison.Ordinal), "personal face corpus readiness JSON did not include identity-session audit stage");
+    Require(readinessJson.Contains("IdentitySessionAuditStatus", StringComparison.Ordinal), "personal face corpus readiness JSON did not include identity-session audit status");
     Require(readinessHtml.Contains("Coverage Scores", StringComparison.Ordinal), "personal face corpus readiness HTML did not include score section");
     Require(readinessHtml.Contains("Identity", StringComparison.Ordinal), "personal face corpus readiness HTML did not include identity score");
     Require(readinessHtml.Contains("Contour Shape", StringComparison.Ordinal), "personal face corpus readiness HTML did not include contour shape score");
     Require(readinessHtml.Contains("Direct Feature Trust", StringComparison.Ordinal), "personal face corpus readiness HTML did not include direct feature trust score");
+    Require(readinessHtml.Contains("Aperture Consistency", StringComparison.Ordinal), "personal face corpus readiness HTML did not include aperture consistency score");
+    Require(readinessHtml.Contains("Eye Aperture Reliability", StringComparison.Ordinal), "personal face corpus readiness HTML did not include eye aperture reliability score");
+    Require(readinessHtml.Contains("Mouth Anchor", StringComparison.Ordinal), "personal face corpus readiness HTML did not include mouth anchor score");
     Require(readinessHtml.Contains("Learning Stability", StringComparison.Ordinal), "personal face corpus readiness HTML did not include learning stability score");
+    Require(readinessHtml.Contains("Weakest tracked weight", StringComparison.Ordinal), "personal face corpus readiness HTML did not include weakest tracked distribution weight");
     Require(readinessHtml.Contains("Capture Quality", StringComparison.Ordinal), "personal face corpus readiness HTML did not include capture quality score");
+    Require(readinessHtml.Contains("XYZABC", StringComparison.Ordinal), "personal face corpus readiness HTML did not include XYZABC score");
+    Require(readinessHtml.Contains("Data Audit", StringComparison.Ordinal), "personal face corpus readiness HTML did not include data audit score");
+    Require(readinessHtml.Contains("Pose Bucket Consistency", StringComparison.Ordinal), "personal face corpus readiness HTML did not include pose-bucket consistency score");
+    Require(readinessHtml.Contains("Surface Geometry", StringComparison.Ordinal), "personal face corpus readiness HTML did not include surface geometry score");
+    Require(readinessHtml.Contains("Identity Session", StringComparison.Ordinal), "personal face corpus readiness HTML did not include identity-session score");
+    Require(readinessHtml.Contains("Identity session status", StringComparison.Ordinal), "personal face corpus readiness HTML did not include identity-session audit status");
     Require(!readinessJson.Contains("FaceContour", StringComparison.Ordinal) && !readinessJson.Contains("data:image", StringComparison.OrdinalIgnoreCase), "personal face corpus readiness leaked raw contour/image data");
     Require(!readinessHtml.Contains("data:image", StringComparison.OrdinalIgnoreCase), "personal face corpus readiness HTML embedded raw image data");
 
@@ -1626,8 +2714,65 @@ static void RunPersonalFaceModelSmoke()
     Require(collectionAudit.TotalFramesReviewed == awakeSampleCount + 1, $"personal collection audit frame count wrong: {collectionAudit.TotalFramesReviewed}");
     Require(collectionAudit.PersonalModelAcceptedFrames >= 18, $"personal collection audit accepted too few frames: {collectionAudit.PersonalModelAcceptedFrames}");
     Require(collectionAudit.LowQualityGateFrames >= 1, "personal collection audit did not count low-quality gate frames");
+    Require(collectionAudit.IdentityMeasuredFrames >= 18, $"personal collection audit identity measured frames too low: {collectionAudit.IdentityMeasuredFrames}");
+    Require(collectionAudit.AverageIdentityConfidencePercent.HasValue, "personal collection audit did not summarize identity confidence");
     Require(collectionAudit.CaptureQualityCollectableRate < 1d, "personal collection audit did not reflect rejected low camera-mode sample");
     Require(collectionAudit.TopPersonalModelRejectionReasons.Count > 0, "personal collection audit did not summarize rejection reasons");
+    var trackingHoldObservations = collectionAuditObservations
+        .Concat([
+            new PersonalFaceCollectionAuditObservation
+            {
+                ReviewedAtUtc = startedAt.AddSeconds(awakeSampleCount * 0.5d + 1d),
+                SubjectConfirmed = true,
+                HasFace = true,
+                PersonalModelAccepted = false,
+                PersonalModelRejectionKind = PersonalFaceModelRejectionKind.TrackingAuditHold.ToString(),
+                PersonalModelUpdateReason = "tracking audit hold: head A/B rotations are not moving",
+                CaptureQualityLabel = "avatar-grade",
+                CaptureQualityScorePercent = 88d,
+                CaptureQualityCanCollect = true,
+                CaptureQualityAvatarGrade = true,
+                CaptureQualityReason = "tracking audit hold",
+                CaptureQualityCameraModeScorePercent = 92d,
+                CaptureQualityFaceScaleScorePercent = 90d,
+                CaptureQualityEyeScorePercent = 88d,
+                CaptureQualityMouthScorePercent = 86d,
+                CaptureQualityStabilityScorePercent = 90d,
+                CaptureQualityGlassesScorePercent = 82d,
+                CaptureQualityStorageScorePercent = 100d
+            },
+            new PersonalFaceCollectionAuditObservation
+            {
+                ReviewedAtUtc = startedAt.AddSeconds(awakeSampleCount * 0.5d + 1.5d),
+                SubjectConfirmed = true,
+                HasFace = true,
+                PersonalModelAccepted = false,
+                PersonalModelRejectionKind = PersonalFaceModelRejectionKind.TrackingArtifact.ToString(),
+                PersonalModelUpdateReason = "eye artifact suppression active; not learning personal face shape from this frame",
+                CaptureQualityLabel = "limited",
+                CaptureQualityScorePercent = 66d,
+                CaptureQualityCanCollect = false,
+                CaptureQualityAvatarGrade = false,
+                CaptureQualityReason = "tracking artifact gate",
+                CaptureQualityCameraModeScorePercent = 92d,
+                CaptureQualityFaceScaleScorePercent = 90d,
+                CaptureQualityEyeScorePercent = 42d,
+                CaptureQualityMouthScorePercent = 86d,
+                CaptureQualityStabilityScorePercent = 90d,
+                CaptureQualityGlassesScorePercent = 36d,
+                CaptureQualityStorageScorePercent = 100d
+            }
+        ])
+        .ToList();
+    var trackingHoldAudit = new PersonalFaceCollectionAuditBuilder().Build(model, trackingHoldObservations);
+    Require(trackingHoldAudit.TrackingAuditHoldFrames == 1, "personal collection audit did not count tracking audit holds");
+    Require(trackingHoldAudit.TrackingArtifactGateFrames == 1, "personal collection audit did not count tracking artifact gates");
+    Require(
+        trackingHoldAudit.NextActions.Any(static action => action.Contains("tracking audit", StringComparison.OrdinalIgnoreCase)),
+        "personal collection audit did not suggest next action for tracking audit holds");
+    Require(
+        trackingHoldAudit.NextActions.Any(static action => action.Contains("Tracking artifacts", StringComparison.OrdinalIgnoreCase)),
+        "personal collection audit did not suggest next action for tracking artifacts");
     var collectionAuditPath = new PersonalFaceCollectionAuditStore().Write(journalRoot, collectionAudit);
     var collectionAuditHtmlPath = PersonalFaceCollectionAuditStore.GetHtmlPath(collectionAuditPath);
     Require(File.Exists(collectionAuditPath), "personal collection audit JSON was not written");
@@ -1637,7 +2782,13 @@ static void RunPersonalFaceModelSmoke()
     Require(collectionAuditJson.Contains("personal-face-collection-audit-v1", StringComparison.Ordinal), "personal collection audit JSON did not include schema");
     Require(collectionAuditJson.Contains("CaptureQualityCollectableRate", StringComparison.Ordinal), "personal collection audit JSON did not include collectable rate");
     Require(collectionAuditJson.Contains("TopCaptureQualityIssues", StringComparison.Ordinal), "personal collection audit JSON did not include top capture issues");
+    Require(collectionAuditJson.Contains("AverageIdentityConfidencePercent", StringComparison.Ordinal), "personal collection audit JSON did not include identity confidence");
+    Require(collectionAuditJson.Contains("TrackingAuditHoldFrames", StringComparison.Ordinal), "personal collection audit JSON did not include tracking audit hold frames");
+    Require(collectionAuditJson.Contains("TrackingArtifactGateFrames", StringComparison.Ordinal), "personal collection audit JSON did not include tracking artifact gate frames");
     Require(collectionAuditHtml.Contains("Collection Gates", StringComparison.Ordinal), "personal collection audit HTML did not include gate section");
+    Require(collectionAuditHtml.Contains("Identity confidence", StringComparison.Ordinal), "personal collection audit HTML did not include identity confidence");
+    Require(collectionAuditHtml.Contains("Tracking audit hold", StringComparison.Ordinal), "personal collection audit HTML did not include tracking audit hold count");
+    Require(collectionAuditHtml.Contains("Tracking artifact gate", StringComparison.Ordinal), "personal collection audit HTML did not include tracking artifact count");
     Require(!collectionAuditJson.Contains("FaceContour", StringComparison.Ordinal) && !collectionAuditJson.Contains("data:image", StringComparison.OrdinalIgnoreCase), "personal collection audit leaked raw contour/image data");
     Require(!collectionAuditHtml.Contains("data:image", StringComparison.OrdinalIgnoreCase), "personal collection audit HTML embedded raw image data");
 
@@ -1755,9 +2906,12 @@ static void RunPersonalFaceModelSmoke()
         mouthCenterY: 0.68d);
     var warmupMismatchMetrics = warmupIdentityCalculator.Update(warmupMismatchFrame);
     var warmupMismatchUpdate = warmupIdentityBuilder.Update(warmupMismatchFrame, warmupMismatchMetrics, warmupIdentityStability, cueAnalysis: null, trendAnalysis: null);
+    var warmupMismatchScores = warmupMismatchUpdate.IdentityAnalysis is null
+        ? "no identity analysis"
+        : string.Join("; ", warmupMismatchUpdate.IdentityAnalysis.FeatureScores.Select(score => $"{score.Name}={score.ConfidencePercent:0.#}% outlier={score.IsOutlier}"));
     Require(
         !warmupMismatchUpdate.Accepted && warmupMismatchUpdate.RejectionKind == PersonalFaceModelRejectionKind.SubjectMismatch,
-        $"warmup identity protection did not reject an extreme synthetic non-subject: {warmupMismatchUpdate.RejectionKind}, {warmupMismatchUpdate.Reason}");
+        $"warmup identity protection did not reject an extreme synthetic non-subject: {warmupMismatchUpdate.RejectionKind}, {warmupMismatchUpdate.Reason}; analysis {warmupMismatchUpdate.IdentityAnalysis?.Status}; scores {warmupMismatchScores}");
     Require(
         warmupMismatchUpdate.IdentityAnalysis is { AutoGateReady: false, WarmupStrongMismatchGateReady: true, ConfidencePercent: < 12d },
         $"warmup identity protection did not report a strong mismatch: {warmupMismatchUpdate.IdentityAnalysis?.Status}");
@@ -1830,6 +2984,97 @@ static void RunPersonalFaceModelSmoke()
     Require(!nonSubjectUpdate.Accepted && nonSubjectUpdate.RejectionKind == PersonalFaceModelRejectionKind.SubjectMismatch, $"identity gate did not reject a synthetic non-subject: {nonSubjectUpdate.RejectionKind}, {nonSubjectUpdate.Reason}");
     Require(nonSubjectUpdate.IdentityAnalysis is { AutoGateReady: true, ConfidencePercent: < 28d }, $"identity gate did not report low confidence: {nonSubjectUpdate.IdentityAnalysis?.ConfidencePercent}");
     Require(nonSubjectUpdate.Model.SubjectMismatchRejectedSamples >= 1, "personal model did not count subject mismatch rejection");
+}
+
+static void RunPersonalFaceSurfaceProfileSmoke()
+{
+    var builder = new PersonalFaceModelBuilder();
+    var stabilityAnalyzer = new FaceLockStabilityAnalyzer();
+    var calculator = new FaceLandmarkMetricCalculator();
+    var startedAt = DateTime.UtcNow;
+    PersonalFaceModelUpdate update = new(false, PersonalFaceModelRejectionKind.NoFace, "not started", 0d, builder.CurrentModel);
+
+    for (var index = 0; index < 24; index++)
+    {
+        var frame = CreateSyntheticDenseMeshFrame(
+            scale: 0.94d + index % 5 * 0.025d,
+            matrixYawDegrees: -10d + index % 6 * 4d,
+            matrixPitchDegrees: -4d + index % 4 * 2d,
+            matrixRollDegrees: -3d + index % 3 * 3d,
+            capturedAtUtc: startedAt.AddSeconds(index * 0.4d));
+        var metrics = calculator.Update(frame);
+        var stability = stabilityAnalyzer.Update(
+            new FaceFeatureDetection
+            {
+                HasFace = true,
+                FaceBox = new WpfRect(0.28d, 0.18d, 0.44d, 0.64d),
+                TrackingConfidence = frame.TrackingConfidence,
+                EyeConfidence = frame.EyeConfidence,
+                MouthConfidence = frame.MouthConfidence,
+                Source = "surface profile smoke dense face box"
+            },
+            frame,
+            metrics);
+        update = builder.Update(frame, metrics, stability, cueAnalysis: null, trendAnalysis: null);
+    }
+
+    var model = update.Model;
+    Require(model.LeftBrowShape.SampleCount >= 12 && model.LeftBrowShape.Points.Count == 10, "personal model did not learn aggregate left-brow 3D surface profile");
+    Require(model.RightBrowShape.SampleCount >= 12 && model.RightBrowShape.Points.Count == 10, "personal model did not learn aggregate right-brow 3D surface profile");
+    Require(model.NoseBridgeShape.SampleCount >= 12 && model.NoseBridgeShape.Points.Count == 10, "personal model did not learn aggregate nose-bridge 3D surface profile");
+    Require(model.NoseBaseShape.SampleCount >= 12 && model.NoseBaseShape.Points.Count == 5, "personal model did not learn aggregate nose-base 3D surface profile");
+    Require(model.LeftCheekSurface.SampleCount >= 12 && model.LeftCheekSurface.Points.Count == 6, "personal model did not learn aggregate left-cheek 3D surface profile");
+    Require(model.RightCheekSurface.SampleCount >= 12 && model.RightCheekSurface.Points.Count == 6, "personal model did not learn aggregate right-cheek 3D surface profile");
+    Require(model.ForeheadSurface.SampleCount >= 12 && model.ForeheadSurface.Points.Count == 9, "personal model did not learn aggregate forehead 3D surface profile");
+    Require(model.NoseBridgeShape.Points.Any(static point => point.Z.SampleCount > 0 && point.Z.Average.HasValue), "nose bridge surface profile did not retain weighted Z depth evidence");
+    Require(model.LeftCheekSurface.Points.Any(static point => point.Z.SampleCount > 0 && point.Z.Average.HasValue), "cheek surface profile did not retain weighted Z depth evidence");
+
+    var motionModel = new PersonalFaceMotionModel
+    {
+        SubjectId = model.SubjectId,
+        SubjectDisplayName = model.SubjectDisplayName,
+        CreatedAtUtc = model.CreatedAtUtc,
+        UpdatedAtUtc = model.UpdatedAtUtc
+    };
+    var readiness = new PersonalFaceCorpusReadinessBuilder().Build(model, motionModel, [], measurementJournalBytes: 0L);
+    Require(readiness.SurfaceShapeCoveragePercent > 0d, "learning-data health did not score dense surface shape coverage");
+    Require(readiness.XYZABCCoveragePercent > 0d, "learning-data health did not score XYZABC pose/distance coverage for moving dense samples");
+    Require(readiness.NoseBridgeShapeSamples == model.NoseBridgeShape.SampleCount, "learning-data health did not report nose bridge surface samples");
+
+    var gate = FaceReconstructionSubjectGate.FromPersonalModel(model, manualSubjectConfirmed: true, identityConfidencePercent: 96d);
+    var preview = new MeasurementFacePreviewBuilder().Build(model, gate);
+    Require(preview.ContourShapeProfiles.ContainsKey("nose_bridge_shape"), "measurement face preview omitted nose bridge surface profile");
+    Require(preview.ContourShapeProfiles.ContainsKey("forehead_surface"), "measurement face preview omitted forehead surface profile");
+    Require(preview.Points.Any(static point => point.Role == "nose" && point.Provenance.Contains("personal", StringComparison.OrdinalIgnoreCase)), "measurement face preview did not render measured nose surface points");
+    Require(preview.Points.Any(static point => point.Role == "cheek"), "measurement face preview did not render measured cheek surface points");
+
+    var package = new MeasurementAvatarTrainingPackageBuilder().Build(model, motionModel, readiness, gate, measurementJournalBytes: 0L);
+    Require(package.Readiness.SurfaceShapeCoveragePercent > 0d, "avatar package omitted surface shape readiness score");
+    Require(package.ContourShapeProfiles.ContainsKey("nose_bridge_shape"), "avatar package omitted nose bridge surface profile");
+    Require(package.ContourShapeProfiles.ContainsKey("left_cheek_surface"), "avatar package omitted cheek surface profile");
+    Require(package.IntegrationNotes.Any(static note => note.Contains("surface shape profiles", StringComparison.OrdinalIgnoreCase)), "avatar package omitted surface-profile integration guidance");
+}
+
+static void RequireBoundedAverageMovement(
+    string label,
+    double? beforeAverage,
+    double? newObservation,
+    double? afterAverage,
+    double maximumInfluencePercent)
+{
+    Require(beforeAverage.HasValue, $"{label} drift check missing before average");
+    Require(newObservation.HasValue, $"{label} drift check missing new observation");
+    Require(afterAverage.HasValue, $"{label} drift check missing after average");
+    var denominator = Math.Abs(newObservation!.Value - beforeAverage!.Value);
+    if (denominator <= 0.000001d)
+    {
+        return;
+    }
+
+    var actualInfluencePercent = Math.Abs(afterAverage!.Value - beforeAverage.Value) / denominator * 100d;
+    Require(
+        actualInfluencePercent <= maximumInfluencePercent + 0.20d,
+        $"{label} average moved {actualInfluencePercent:0.###}% toward one outlier, above reported {maximumInfluencePercent:0.###}% max influence");
 }
 
 static void RunPersonalFaceCaptureQualitySmoke()
@@ -1940,6 +3185,200 @@ static void RunPersonalFaceCaptureQualitySmoke()
     Require(weak.Issues.Any(issue => issue.Contains("low resolution", StringComparison.OrdinalIgnoreCase)), $"weak capture did not flag low resolution: {string.Join("; ", weak.Issues)}");
     Require(weak.Issues.Any(issue => issue.Contains("small", StringComparison.OrdinalIgnoreCase)), $"weak capture did not flag small face: {string.Join("; ", weak.Issues)}");
     Require(weak.Suggestions.Count > 0, "weak capture did not suggest a correction");
+}
+
+static void RunHeadPoseEstimatorSmoke()
+{
+    var estimator = new HeadPoseEstimator();
+    var calibration = new HeadPoseCalibration
+    {
+        CameraHorizontalFovDegrees = 71.4d,
+        ReferenceInterEyeFrameWidth = 0.16d,
+        ReferenceSampleCount = 48,
+        ReferenceSource = "learned synthetic face scale"
+    };
+    var nearFrame = CreateSyntheticDenseMeshFrame(scale: 1.18d, matrixYawDegrees: 14d);
+    var farFrame = CreateSyntheticDenseMeshFrame(scale: 0.72d, matrixYawDegrees: 14d);
+    var flatNeutralFrame = CreateSyntheticDenseMeshFrame();
+    var pitchFrame = CreateSyntheticDenseMeshFrame(matrixPitchDegrees: -6d);
+    var rollFrame = CreateSyntheticDenseMeshFrame(matrixRollDegrees: 3d);
+    var denseYawFrame = CreateSyntheticDenseYawEvidenceFrame();
+    var near = estimator.Estimate(new HeadPoseEstimatorInput
+    {
+        Frame = nearFrame,
+        FrameWidthPixels = 3840,
+        FrameHeightPixels = 2160,
+        Calibration = calibration
+    });
+    var far = estimator.Estimate(new HeadPoseEstimatorInput
+    {
+        Frame = farFrame,
+        FrameWidthPixels = 3840,
+        FrameHeightPixels = 2160,
+        Calibration = calibration
+    });
+    var flatNeutral = estimator.Estimate(new HeadPoseEstimatorInput
+    {
+        Frame = flatNeutralFrame,
+        FrameWidthPixels = 3840,
+        FrameHeightPixels = 2160,
+        Calibration = calibration
+    });
+    var pitch = estimator.Estimate(new HeadPoseEstimatorInput
+    {
+        Frame = pitchFrame,
+        FrameWidthPixels = 3840,
+        FrameHeightPixels = 2160,
+        Calibration = calibration
+    });
+    var roll = estimator.Estimate(new HeadPoseEstimatorInput
+    {
+        Frame = rollFrame,
+        FrameWidthPixels = 3840,
+        FrameHeightPixels = 2160,
+        Calibration = calibration
+    });
+    var denseYaw = estimator.Estimate(new HeadPoseEstimatorInput
+    {
+        Frame = denseYawFrame,
+        FrameWidthPixels = 3840,
+        FrameHeightPixels = 2160,
+        Calibration = calibration
+    });
+
+    Require(near.HasFace && far.HasFace, "head pose estimator did not accept synthetic dense faces");
+    Require(near.FaceFillWidthPercent > far.FaceFillWidthPercent, "head pose face fill did not increase for the closer/larger synthetic face");
+    Require(near.ApparentDistanceUnits < far.ApparentDistanceUnits, "head pose apparent Z units did not decrease as face fill increased");
+    Require(near.ZRelativeToReference is < 1d, $"head pose relative Z did not show closer-than-reference face: {near.ZRelativeToReference}");
+    Require(far.ZRelativeToReference is > 1d, $"head pose relative Z did not show farther-than-reference face: {far.ZRelativeToReference}");
+    Require(near.ZConfidencePercent >= 70d, $"head pose Z confidence was too low: {near.ZConfidencePercent}");
+    Require(near.ZUsesCameraFov, "head pose Z did not report camera-FOV evidence");
+    Require(near.ZUsesLearnedReference, "head pose Z did not report learned-reference evidence");
+    Require(near.ZEstimateKind.Contains("camera-fov", StringComparison.OrdinalIgnoreCase), $"head pose Z estimate kind was unexpected: {near.ZEstimateKind}");
+    Require(near.ZQualityLabel.Contains("Z", StringComparison.Ordinal), $"head pose Z quality label was missing: {near.ZQualityLabel}");
+    Require(near.ReferenceScaleSource.Contains("synthetic", StringComparison.OrdinalIgnoreCase), $"head pose relative Z did not retain reference source: {near.ReferenceScaleSource}");
+    Require(near.XHorizontalPercent is > 45d and < 55d, $"head pose X center was implausible: {near.XHorizontalPercent}");
+    Require(near.YVerticalPercent is > 45d and < 55d, $"head pose Y center was implausible: {near.YVerticalPercent}");
+    Require(Math.Abs(near.BRotationAroundYDegrees - 14d) < 0.75d, $"head pose B/Y rotation was wrong: {near.BRotationAroundYDegrees}");
+    Require(Math.Abs(flatNeutral.BRotationAroundYDegrees) < 1d && Math.Abs(flatNeutral.ARotationAroundXDegrees) < 1d, $"head pose dense fallback biased a flat neutral matrix: A={flatNeutral.ARotationAroundXDegrees}, B={flatNeutral.BRotationAroundYDegrees}");
+    Require(Math.Abs(pitch.ARotationAroundXDegrees - -6d) < 0.75d, $"head pose A/X rotation was wrong: {pitch.ARotationAroundXDegrees}");
+    Require(Math.Abs(roll.CRotationAroundZDegrees - 3d) < 0.75d, $"head pose C/Z rotation was wrong: {roll.CRotationAroundZDegrees}");
+    Require(denseYaw.BRotationAroundYDegrees >= 10d, $"head pose dense fallback did not recover B/Y rotation from mesh geometry: {denseYaw.BRotationAroundYDegrees}");
+    Require(denseYaw.RotationSource.Contains("dense mesh geometry", StringComparison.OrdinalIgnoreCase), $"head pose dense fallback did not report its source: {denseYaw.RotationSource}");
+    Require(near.DistanceSource.Contains("71.4", StringComparison.Ordinal), $"head pose did not use Link 2 Pro horizontal FOV: {near.DistanceSource}");
+    Require(near.ScaleCaveat.Contains("Zoom", StringComparison.OrdinalIgnoreCase), "head pose did not include zoom caveat");
+    Require(near.StatusLine.Contains("Z ref", StringComparison.Ordinal), "head pose status did not report reference-scaled Z");
+    Require(near.StatusLine.Contains("A around X", StringComparison.Ordinal), "head pose status did not use XYZABC rotation labels");
+}
+
+static void RunStoredHeadPoseRoutingSmoke()
+{
+    var capturedAt = DateTime.UtcNow;
+    var frame = CreateSyntheticLandmarkFrame(
+        capturedAt,
+        leftEyeRatio: 0.27d,
+        rightEyeRatio: 0.26d,
+        mouthRatio: 0.08d,
+        eyeConfidence: 0.90d,
+        mouthConfidence: 0.88d,
+        source: "stored head pose routing smoke",
+        headYawDegrees: 0d,
+        headPitchDegrees: 0d,
+        headRollDegrees: 0d);
+    var metrics = new FaceLandmarkMetricCalculator().Update(frame);
+    var stability = new FaceLockStabilityAnalysis
+    {
+        SampleCount = 6,
+        WindowSeconds = 3d,
+        FaceBoundsRatePercent = 100d,
+        FaceContinuityPercent = 94d,
+        EyeUsableRatePercent = 100d,
+        MouthUsableRatePercent = 100d,
+        AverageEyeQualityPercent = metrics.EyeMeasurementQualityPercent,
+        AverageMouthQualityPercent = metrics.MouthMeasurementQualityPercent,
+        AverageOverallQualityPercent = metrics.OverallMeasurementQualityPercent,
+        EyeReliabilityPercent = 93d,
+        MouthReliabilityPercent = 91d,
+        CompositeReliabilityPercent = 94d
+    };
+    var pose = new HeadPoseEstimate
+    {
+        HasFace = true,
+        CapturedAtUtc = capturedAt,
+        YawDegrees = 16d,
+        PitchDegrees = -9d,
+        RollDegrees = 4d,
+        ApparentDistanceUnits = 4.8d,
+        RelativeDistanceScale = 1.05d,
+        ZConfidencePercent = 88d,
+        ZEstimateKind = "pose-routing-smoke",
+        RotationSource = "pose routing smoke"
+    };
+    var builder = new PersonalFaceModelBuilder();
+    var update = builder.Update(frame, metrics, stability, cueAnalysis: null, trendAnalysis: null, pose);
+    Require(update.Accepted, $"personal model rejected stored-pose routing smoke: {update.Reason}");
+    Require(MatchesAverage(update.Model.HeadYawDegrees, 16d), $"personal model stored stale B/Y rotation: {update.Model.HeadYawDegrees.Average}");
+    Require(MatchesAverage(update.Model.HeadPitchDegrees, -9d), $"personal model stored stale A/X rotation: {update.Model.HeadPitchDegrees.Average}");
+    Require(MatchesAverage(update.Model.HeadRollDegrees, 4d), $"personal model stored stale C/Z rotation: {update.Model.HeadRollDegrees.Average}");
+    Require(
+        update.Model.PoseBuckets.Any(static bucket =>
+            bucket.BucketId == PersonalFacePoseBuckets.YawPositive
+            && bucket.SampleCount == 1
+            && MatchesAverage(bucket.HeadYawDegrees, 16d)),
+        "personal model did not route stored B/Y rotation into the positive-B pose bucket");
+    Require(
+        update.Model.PoseBuckets.Any(static bucket =>
+            bucket.BucketId == PersonalFacePoseBuckets.PitchNegative
+            && bucket.SampleCount == 1
+            && MatchesAverage(bucket.HeadPitchDegrees, -9d)),
+        "personal model did not route stored A/X rotation into the negative-A pose bucket");
+
+    var captureQuality = new PersonalFaceCaptureQualityAssessment
+    {
+        Label = "avatar-grade",
+        ScorePercent = 92d,
+        CanCollectMeasurements = true,
+        StrongEnoughForAvatarLearning = true,
+        PrimaryReason = "stored head pose routing smoke"
+    };
+    var sample = PersonalFaceMeasurementSample.Create(update, frame, metrics, stability, captureQuality, pose);
+    Require(Math.Abs(sample.HeadYawDegrees - 16d) < 0.001d, $"measurement sample stored stale B/Y rotation: {sample.HeadYawDegrees}");
+    Require(sample.PoseBucketIds.Contains(PersonalFacePoseBuckets.YawPositive), "measurement sample did not retain positive-B bucket id");
+
+    var observation = PersonalFaceMotionObservation.Create(
+        update.Model.SubjectId,
+        update.Model.SubjectDisplayName,
+        update.Model.SubjectCollectionMode,
+        capturedAt,
+        update.SampleWeight,
+        metrics,
+        stability,
+        acceptedForPersonalModel: true,
+        source: "stored head pose routing smoke",
+        pose);
+    Require(Math.Abs(observation.HeadYawDegrees - 16d) < 0.001d, $"motion observation stored stale B/Y rotation: {observation.HeadYawDegrees}");
+
+    var journalRoot = Path.Combine(Path.GetTempPath(), $"EpisodeMonitorStoredPoseSmoke-{Guid.NewGuid():N}");
+    try
+    {
+        var journal = new PersonalFaceMeasurementJournal(TimeSpan.Zero, 1_000_000L);
+        var journalPath = journal.WriteAcceptedSampleIfDue(journalRoot, update, frame, metrics, stability, captureQuality, pose);
+        Require(File.Exists(journalPath), "measurement journal did not write stored-pose sample");
+        var journalSample = PersonalFaceMeasurementJournal.ReadRecentSamples(journalRoot, 10).Single();
+        Require(Math.Abs(journalSample.HeadYawDegrees - 16d) < 0.001d, $"measurement journal stored stale B/Y rotation: {journalSample.HeadYawDegrees}");
+    }
+    finally
+    {
+        if (Directory.Exists(journalRoot))
+        {
+            Directory.Delete(journalRoot, recursive: true);
+        }
+    }
+}
+
+static bool MatchesAverage(PersonalMetricDistribution distribution, double expected, double tolerance = 0.001d)
+{
+    return distribution.Average is double average && Math.Abs(average - expected) <= tolerance;
 }
 
 static void RunPersonalFaceMotionModelSmoke()
@@ -2097,6 +3536,13 @@ static void RunMeasurementFacePreviewSmoke()
         OuterLipShape = ShapeProfile("outer_lip_shape", "Outer lip contour shape", 12, closed: true),
         InnerLipShape = ShapeProfile("inner_lip_shape", "Inner lip contour shape", 10, closed: true),
         JawShape = ShapeProfile("jaw_shape", "Jaw contour shape", 9, closed: false),
+        LeftBrowShape = SurfaceProfile("left_brow_shape", "Left brow 3D shape", 10, depth: 0.035d),
+        RightBrowShape = SurfaceProfile("right_brow_shape", "Right brow 3D shape", 10, depth: 0.035d),
+        NoseBridgeShape = SurfaceProfile("nose_bridge_shape", "Nose bridge 3D shape", 10, depth: 0.09d),
+        NoseBaseShape = SurfaceProfile("nose_base_shape", "Nose base 3D shape", 5, depth: 0.065d),
+        LeftCheekSurface = SurfaceProfile("left_cheek_surface", "Left cheek 3D surface", 6, depth: 0.025d),
+        RightCheekSurface = SurfaceProfile("right_cheek_surface", "Right cheek 3D surface", 6, depth: 0.025d),
+        ForeheadSurface = SurfaceProfile("forehead_surface", "Forehead 3D surface", 9, depth: 0.02d),
         PoseBuckets = PoseBucketProfiles()
     };
     var acceptedGate = FaceReconstructionSubjectGate.FromPersonalModel(
@@ -2113,6 +3559,33 @@ static void RunMeasurementFacePreviewSmoke()
     Require(preview.Points.Count >= 70, $"measurement face preview geometry was too sparse: {preview.Points.Count}");
     Require(preview.Points.Any(static point => point.Provenance.Contains("personal", StringComparison.OrdinalIgnoreCase)), "measurement face preview points omitted provenance");
     Require(preview.ContourShapeProfiles.ContainsKey("left_eye_shape"), "measurement face preview omitted aggregate contour shape profiles");
+    Require(preview.ContourShapeProfiles.ContainsKey("nose_bridge_shape"), "measurement face preview omitted aggregate nose bridge surface profile");
+    Require(preview.Points.Any(static point => point.Role == "nose" && point.Provenance.Contains("personal", StringComparison.OrdinalIgnoreCase)), "measurement face preview did not render measured nose surface geometry");
+    Require(preview.Points.Any(static point => point.Role == "cheek" && point.Provenance.Contains("personal", StringComparison.OrdinalIgnoreCase)), "measurement face preview did not render measured cheek surface geometry");
+    Require(preview.PoseBuckets.Count >= PersonalFacePoseBuckets.Definitions.Count, "measurement face preview omitted pose bucket summaries");
+    Require(preview.PoseBuckets.Any(static bucket => bucket.BucketId == PersonalFacePoseBuckets.FrontNeutral && bucket.SampleCount > 0), "measurement face preview omitted front-neutral pose bucket summary");
+    Require(preview.PoseBuckets.Any(static bucket => bucket.BucketId == PersonalFacePoseBuckets.YawNegative && Math.Abs(bucket.HeadYawDegrees) > 5d), "measurement face preview omitted turned-head pose bucket summary");
+    Require(preview.PoseBucketConsistency.ComparedPoseBucketCount > 0, "measurement face preview omitted pose-bucket consistency comparisons");
+    Require(preview.PoseBucketConsistency.HealthPercent > 0d, "measurement face preview omitted pose-bucket consistency health");
+    Require(preview.SurfaceEvidence.Count >= 6, "measurement face preview omitted surface-confidence evidence");
+    Require(preview.SurfaceEvidence.Any(static surface => surface.RegionId == "nose_projection" && surface.DepthEvidencePercent > surface.FrontEvidencePercent), "measurement face preview did not treat nose projection as depth-driven evidence");
+    Require(preview.SurfaceEvidence.Any(static surface => surface.RegionId == "cheeks" && surface.SupportingPoseBuckets.Contains(PersonalFacePoseBuckets.YawNegative)), "measurement face preview did not tie cheek evidence to B pose buckets");
+    Require(preview.SurfaceEvidence.Any(static surface => surface.RegionId == "brows_forehead" && surface.NextCaptureHint.Contains("up/down", StringComparison.OrdinalIgnoreCase)), "measurement face preview did not expose forehead A-axis capture guidance");
+    Require(PreviewMetric(preview, "LeftEyeRenderDepthScale") > 0d && PreviewMetric(preview, "RightEyeRenderDepthScale") > 0d, "measurement face preview did not enable learned eye depth rendering");
+    Require(PreviewMetric(preview, "OuterLipRenderDepthScale") > 0d && PreviewMetric(preview, "InnerLipRenderDepthScale") > 0d, "measurement face preview did not enable learned lip depth rendering");
+    Require(PreviewMetric(preview, "JawRenderDepthScale") > 0d, "measurement face preview did not enable learned jaw depth rendering");
+    Require(PreviewMetric(preview, "RenderSurfacePatchCount") >= 8d, "measurement face preview omitted measured surface patches");
+    Require(PreviewMetric(preview, "RenderSurfaceTriangleCount") >= 40d, "measurement face preview omitted measured surface patch triangles");
+    Require(PreviewMetric(preview, "RenderSurfacePatchTotalArea") > 0.001d, "measurement face preview omitted measured surface patch area");
+    Require(PreviewMetric(preview, "RenderSurfacePatchAverageNormalConsistencyPercent") > 40d, "measurement face preview surface patch normals were not coherent enough");
+    Require(RoleZRange(preview, "eye") > 0.005d, "measurement face preview rendered learned eye contours too flat");
+    Require(RoleZRange(preview, "mouth") > 0.005d, "measurement face preview rendered learned lip contours too flat");
+    Require(RoleZRange(preview, "jaw") > 0.005d, "measurement face preview rendered learned jaw contour too flat");
+    ValidateMeasurementFacePreviewSurfacePatches(
+        preview.Points,
+        preview.SurfacePatches,
+        "measurement face preview",
+        requireMeasuredPatches: true);
     Require(preview.Polylines.Any(static line => line.Role == "eye"), "measurement face preview did not include eye geometry");
     Require(preview.Polylines.Any(static line => line.Role == "mouth-opening"), "measurement face preview did not include mouth-opening geometry");
     Require(preview.Polylines.Any(static line => line.Role == "jaw-droop"), "measurement face preview did not include jaw-droop geometry");
@@ -2125,9 +3598,31 @@ static void RunMeasurementFacePreviewSmoke()
     var json = File.ReadAllText(files.JsonPath);
     var html = File.ReadAllText(files.HtmlPath);
     Require(json.Contains("\"CanRender\": true", StringComparison.Ordinal), "measurement face preview JSON did not mark the preview renderable");
+    Require(json.Contains("\"PoseBuckets\"", StringComparison.Ordinal), "measurement face preview JSON did not include pose bucket summaries");
+    Require(json.Contains("\"PoseBucketConsistency\"", StringComparison.Ordinal), "measurement face preview JSON did not include pose-bucket consistency report");
+    Require(json.Contains("\"SurfaceEvidence\"", StringComparison.Ordinal), "measurement face preview JSON did not include surface-confidence evidence");
+    Require(json.Contains("\"SurfacePatches\"", StringComparison.Ordinal), "measurement face preview JSON did not include measured surface patches");
+    Require(json.Contains("\"Triangles\"", StringComparison.Ordinal), "measurement face preview JSON did not include measured surface patch triangles");
+    Require(json.Contains("\"NormalConsistencyPercent\"", StringComparison.Ordinal), "measurement face preview JSON did not include surface patch normal consistency");
+    Require(json.Contains("\"GeometryHealthPercent\"", StringComparison.Ordinal), "measurement face preview JSON did not include surface patch geometry health");
+    Require(json.Contains("\"RegionId\": \"nose_projection\"", StringComparison.Ordinal), "measurement face preview JSON did not include nose projection evidence");
+    Require(json.Contains("\"nose_bridge_shape\"", StringComparison.Ordinal), "measurement face preview JSON did not include nose bridge surface profile");
+    Require(json.Contains("\"PoseAxisHealthPercent\"", StringComparison.Ordinal), "measurement face preview JSON did not include pose-axis health");
     Require(html.Contains("<svg", StringComparison.OrdinalIgnoreCase), "measurement face preview HTML did not include an SVG view");
     Require(html.Contains("id=\"face3d\"", StringComparison.Ordinal), "measurement face preview HTML did not include the interactive 3D canvas");
     Require(html.Contains("id=\"face-preview-scene\"", StringComparison.Ordinal), "measurement face preview HTML did not include embedded 3D scene data");
+    Require(html.Contains("Pose Buckets", StringComparison.Ordinal), "measurement face preview HTML did not include pose bucket table");
+    Require(html.Contains("Pose buckets", StringComparison.Ordinal), "measurement face preview HTML did not include pose bucket overlay summary");
+    Require(html.Contains("Pose Consistency", StringComparison.Ordinal), "measurement face preview HTML did not include pose consistency section");
+    Require(html.Contains("Surface Confidence", StringComparison.Ordinal), "measurement face preview HTML did not include surface confidence section");
+    Require(html.Contains("Surface Patch Geometry", StringComparison.Ordinal), "measurement face preview HTML did not include surface patch geometry section");
+    Require(html.Contains("Health", StringComparison.Ordinal), "measurement face preview HTML did not expose surface patch health");
+    Require(html.Contains("surface-patch", StringComparison.Ordinal), "measurement face preview HTML did not render measured surface patches");
+    Require(html.Contains("surface-triangle", StringComparison.Ordinal), "measurement face preview HTML did not render measured surface patch triangles");
+    Require(html.Contains("Normal consistency", StringComparison.Ordinal), "measurement face preview HTML did not expose surface normal consistency");
+    Require(html.Contains("Nose projection", StringComparison.Ordinal), "measurement face preview HTML did not include nose projection confidence");
+    Require(html.Contains("Depth", StringComparison.Ordinal), "measurement face preview HTML did not expose depth evidence");
+    Require(html.Contains("Axis reason", StringComparison.Ordinal), "measurement face preview HTML did not include pose-axis audit detail");
     Require(html.Contains("cursor: grab", StringComparison.Ordinal), "measurement face preview HTML did not expose a draggable canvas cursor");
     Require(html.Contains("addEventListener('wheel'", StringComparison.Ordinal), "measurement face preview HTML did not wire mouse-wheel zoom");
     Require(html.Contains("addEventListener('dblclick'", StringComparison.Ordinal), "measurement face preview HTML did not wire double-click reset");
@@ -2153,6 +3648,7 @@ static void RunMeasurementFacePreviewSmoke()
     Require(seedPreview.TemplatePriorUsed, "seed preview did not mark template prior use");
     Require(seedPreview.TemplatePriorContributionPercent == 100d, $"seed preview template contribution was not 100%: {seedPreview.TemplatePriorContributionPercent}");
     Require(seedPreview.MeasurementContributionPercent == 0d, $"seed preview measured contribution was not 0%: {seedPreview.MeasurementContributionPercent}");
+    Require(seedPreview.SurfaceEvidence.Any(static surface => surface.Status == "mostly scaffold"), "seed preview did not mark missing surface evidence as scaffold");
     Require(seedPreview.Points.Count >= 60, $"seed preview geometry was too sparse: {seedPreview.Points.Count}");
     Require(seedPreview.Points.All(static point => point.Provenance.Contains("template", StringComparison.OrdinalIgnoreCase)), "seed preview emitted points without template provenance");
     ValidateMeasurementFacePreviewGeometry(seedPreview, "seed measurement face preview");
@@ -2219,6 +3715,20 @@ static void RunMeasurementFacePreviewSmoke()
     var blockedPreview = builder.Build(model, blockedGate);
     Require(!blockedPreview.CanRender, "measurement face preview rendered with an unconfirmed subject gate");
     Require(blockedPreview.Points.Count == 0 && blockedPreview.Polylines.Count == 0, "blocked measurement face preview still emitted geometry");
+    var blockedFiles = new MeasurementFacePreviewStore().Write(Path.Combine(previewRoot, "blocked"), blockedPreview);
+    var blockedHtml = File.ReadAllText(blockedFiles.HtmlPath);
+    Require(blockedHtml.Contains("Confirm Chris", StringComparison.Ordinal), "blocked measurement face preview did not explain subject confirmation");
+    Require(blockedHtml.Contains("Subject gate", StringComparison.Ordinal), "blocked measurement face preview did not expose the subject-gate reason");
+
+    var blockedSeedGate = FaceReconstructionSubjectGate.FromPersonalModel(
+        seedModel,
+        manualSubjectConfirmed: false,
+        reason: "seed preview subject unconfirmed");
+    var blockedSeedPreview = builder.Build(seedModel, blockedSeedGate);
+    var blockedSeedFiles = new MeasurementFacePreviewStore().Write(Path.Combine(previewRoot, "blocked-seed"), blockedSeedPreview);
+    var blockedSeedHtml = File.ReadAllText(blockedSeedFiles.HtmlPath);
+    Require(blockedSeedHtml.Contains("Confirm Chris", StringComparison.Ordinal), "blocked seed preview did not explain subject confirmation");
+    Require(blockedSeedHtml.Contains("Start Avatar Learning", StringComparison.Ordinal), "blocked seed preview did not explain how to start measurements");
     Directory.Delete(previewRoot, recursive: true);
 }
 
@@ -2232,6 +3742,15 @@ static void ValidateMeasurementFacePreviewHtmlScene(
         ?? throw new InvalidOperationException($"{label} could not deserialize embedded scene JSON");
     Require(scene.Points.Count == expectedPreview.Points.Count, $"{label} point count drifted from the preview model");
     Require(scene.Polylines.Count == expectedPreview.Polylines.Count, $"{label} polyline count drifted from the preview model");
+    Require(scene.SurfacePatches.Count == expectedPreview.SurfacePatches.Count, $"{label} surface patch count drifted from the preview model");
+    Require(scene.PoseBuckets.Count == expectedPreview.PoseBuckets.Count, $"{label} pose bucket count drifted from the preview model");
+    Require(scene.SurfaceEvidence.Count == expectedPreview.SurfaceEvidence.Count, $"{label} surface evidence count drifted from the preview model");
+    Require(
+        scene.PoseBuckets.Count == 0 || scene.PoseBuckets.Any(static bucket => bucket.PrimaryNeutralReference),
+        $"{label} embedded scene omitted the neutral pose reference bucket");
+    Require(
+        scene.SurfaceEvidence.Count == 0 || scene.SurfaceEvidence.Any(static surface => surface.RegionId == "nose_projection"),
+        $"{label} embedded scene omitted nose projection surface evidence");
     Require(
         Math.Abs(scene.MeasurementContributionPercent - expectedPreview.MeasurementContributionPercent) < 0.001d,
         $"{label} measurement contribution drifted from the preview model");
@@ -2241,6 +3760,11 @@ static void ValidateMeasurementFacePreviewHtmlScene(
     Require(
         string.Equals(scene.GeometryProvenance, expectedPreview.GeometryProvenance, StringComparison.Ordinal),
         $"{label} geometry provenance drifted from the preview model");
+    ValidateMeasurementFacePreviewSurfacePatches(
+        scene.Points,
+        scene.SurfacePatches,
+        label,
+        requireMeasuredPatches: expectedPreview.SurfacePatches.Count > 0);
     ValidateMeasurementFacePreviewScene(
         scene.Points,
         scene.Polylines,
@@ -2248,6 +3772,458 @@ static void ValidateMeasurementFacePreviewHtmlScene(
         scene.TemplatePriorContributionPercent,
         scene.GeometryProvenance,
         label);
+}
+
+static void RunLastGoodFeatureMeshSmoke()
+{
+    var frame = CreateSyntheticDenseMeshFrame();
+    var metrics = new FaceLandmarkMetricCalculator().Update(frame);
+    var stability = new FaceLockStabilityAnalyzer().Update(
+        new FaceFeatureDetection
+        {
+            HasFace = true,
+            Source = frame.Source,
+            FaceBox = GetContourBounds(frame.FaceContour) ?? new WpfRect(0.30d, 0.22d, 0.40d, 0.56d),
+            TrackingConfidence = frame.TrackingConfidence,
+            EyeConfidence = frame.EyeConfidence,
+            MouthConfidence = frame.MouthConfidence,
+            FaceContour = frame.FaceContour,
+            LeftEyeContour = frame.LeftEyeContour,
+            RightEyeContour = frame.RightEyeContour,
+            OuterLipContour = frame.OuterLipContour,
+            InnerLipContour = frame.InnerLipContour,
+            JawContour = frame.JawContour
+        },
+        frame,
+        metrics);
+    var captureQuality = new PersonalFaceCaptureQualityAssessment
+    {
+        Label = "avatar-grade",
+        ScorePercent = 88d,
+        CanCollectMeasurements = true,
+        StrongEnoughForAvatarLearning = true,
+        PrimaryReason = "synthetic dense mesh smoke"
+    };
+
+    Require(
+        LastGoodFeatureMeshSampleFactory.TryCreate(frame, metrics, stability, captureQuality, out var sample, out var reason),
+        $"last good feature mesh factory rejected synthetic dense mesh: {reason}");
+    var suppliedPose = new HeadPoseEstimate
+    {
+        HasFace = true,
+        YawDegrees = 16d,
+        PitchDegrees = -6d,
+        RollDegrees = 4d,
+        XHorizontalPercent = 52d,
+        YVerticalPercent = 47d,
+        ApparentDistanceUnits = 3.25d,
+        RelativeDistanceScale = 1.12d,
+        InterEyeFrameWidthPercent = 18.5d,
+        ZConfidencePercent = 88d,
+        ZEstimateKind = "smoke-learned-reference",
+        ZQualityLabel = "strong learned-reference apparent Z",
+        RotationSource = "smoke supplied pose",
+        DistanceSource = "smoke apparent Z",
+        ReferenceScaleSource = "smoke learned reference"
+    };
+    Require(
+        LastGoodFeatureMeshSampleFactory.TryCreate(frame, metrics, stability, captureQuality, out var poseSample, out var poseReason, headPose: suppliedPose),
+        $"last good feature mesh factory rejected synthetic dense mesh with supplied pose: {poseReason}");
+    Require(Math.Abs(poseSample.HeadYawDegrees - 16d) < 0.001d, $"last good feature mesh stored stale B/Y rotation: {poseSample.HeadYawDegrees}");
+    Require(Math.Abs(poseSample.HeadPitchDegrees + 6d) < 0.001d, $"last good feature mesh stored stale A/X rotation: {poseSample.HeadPitchDegrees}");
+    Require(Math.Abs(poseSample.HeadRollDegrees - 4d) < 0.001d, $"last good feature mesh stored stale C/Z rotation: {poseSample.HeadRollDegrees}");
+    Require(Math.Abs(poseSample.XHorizontalPercent - 52d) < 0.001d, $"last good feature mesh omitted X pose center: {poseSample.XHorizontalPercent}");
+    Require(Math.Abs(poseSample.YVerticalPercent - 47d) < 0.001d, $"last good feature mesh omitted Y pose center: {poseSample.YVerticalPercent}");
+    Require(Math.Abs(poseSample.ApparentDistanceUnits.GetValueOrDefault() - 3.25d) < 0.001d, $"last good feature mesh omitted apparent Z: {poseSample.ApparentDistanceUnits}");
+    Require(Math.Abs(poseSample.RelativeDistanceScale.GetValueOrDefault() - 1.12d) < 0.001d, $"last good feature mesh omitted learned Z scale: {poseSample.RelativeDistanceScale}");
+    Require(Math.Abs(poseSample.InterEyeFrameWidthPercent.GetValueOrDefault() - 18.5d) < 0.001d, $"last good feature mesh omitted eye-span pose evidence: {poseSample.InterEyeFrameWidthPercent}");
+    Require(poseSample.RotationSource == "smoke supplied pose", "last good feature mesh omitted pose rotation provenance");
+    Require(poseSample.DistanceSource == "smoke apparent Z", "last good feature mesh omitted pose distance provenance");
+    Require(poseSample.ReferenceScaleSource == "smoke learned reference", "last good feature mesh omitted pose reference provenance");
+    Require(poseSample.ZEstimateKind == "smoke-learned-reference", "last good feature mesh omitted Z estimate kind");
+    Require(metrics.IsBrowMeasurementUsable, $"synthetic dense mesh did not produce usable brow metrics: q {metrics.BrowMeasurementQualityPercent:0.#}");
+    Require(metrics.AverageBrowHeightRatio is > 0.05d and < 0.30d, $"synthetic dense mesh brow height was implausible: {metrics.AverageBrowHeightRatio}");
+    Require(metrics.BrowAsymmetryPercent is < 40d, $"synthetic dense mesh brow asymmetry was implausible: {metrics.BrowAsymmetryPercent}");
+    Require(sample.Points.Count == 468, $"last good feature mesh did not preserve all dense points: {sample.Points.Count}");
+    Require(sample.BrowQualityPercent > 50d, $"last good feature mesh omitted useful brow quality: {sample.BrowQualityPercent:0.#}");
+    Require(sample.AverageBrowHeightRatio is > 0.05d and < 0.30d, $"last good feature mesh omitted useful brow height: {sample.AverageBrowHeightRatio}");
+    Require(sample.FeatureGroups.Any(static group => group.Role == "nose"), "last good feature mesh omitted nose feature group");
+    Require(sample.FeatureGroups.Any(static group => group.Role == "brow"), "last good feature mesh omitted brow feature group");
+    Require(sample.FeatureGroups.Any(static group => group.Role == "cheek"), "last good feature mesh omitted cheek feature group");
+    Require(sample.FeatureGroups.Any(static group => group.Role == "forehead"), "last good feature mesh omitted forehead feature group");
+    Require(sample.WireframeEdges.Count(static edge => edge.Role == "surface") >= 50, "last good feature mesh emitted too few curated facial scaffold edges");
+    Require(sample.WireframeEdges.Any(static edge => edge.Source == "curated-facial-scaffold"), "last good feature mesh omitted curated facial scaffold edge provenance");
+    Require(
+        sample.WireframeEdges
+            .Where(static edge => edge.Role == "surface")
+            .All(static edge => edge.LengthPercent <= 42d),
+        "last good feature mesh emitted a long unsafe surface wireframe edge");
+    Require(sample.WireframeEdges.Any(static edge => edge.Role == "eye"), "last good feature mesh omitted eye wireframe edges");
+    Require(sample.WireframeEdges.Any(static edge => edge.Role == "mouth"), "last good feature mesh omitted mouth wireframe edges");
+    Require(sample.WireframeEdges.Any(static edge => edge.Role == "forehead"), "last good feature mesh omitted forehead wireframe edges");
+    var stableHeadLock = LastGoodFeatureMeshStabilityAnalyzer.Analyze([sample, sample, sample]);
+    Require(stableHeadLock.HeadLockedSampleCount == 3, "last good feature stability analyzer did not head-lock repeated samples");
+    Require(stableHeadLock.HealthPercent >= 82d, $"last good feature stability analyzer treated repeated samples as unstable: {stableHeadLock.HealthPercent:0.#}%");
+    Require(stableHeadLock.YawHealthPercent <= 0d, "last good feature stability analyzer should wait for B range before scoring head turns");
+    var shiftedMouth = ShiftLastGoodFeatureGroup(sample, "outer_lip", 0.18d, 0d, 0d);
+    var driftingHeadLock = LastGoodFeatureMeshStabilityAnalyzer.Analyze([sample, sample, shiftedMouth]);
+    Require(driftingHeadLock.HealthPercent < stableHeadLock.HealthPercent, "last good feature stability analyzer did not reduce health for a shifted mouth");
+    Require(
+        driftingHeadLock.Features.Any(static feature =>
+            feature.FeatureId == "outer_lip"
+            && feature.MaximumDriftPercent >= 8d
+            && feature.Status is "review" or "sliding"),
+        "last good feature stability analyzer did not flag the intentionally shifted lip anchor");
+    Require(
+        driftingHeadLock.Findings.Any(static finding => finding.Contains("drifted", StringComparison.OrdinalIgnoreCase)),
+        "last good feature stability analyzer did not emit an actionable drift finding");
+    var yawLeft = RotateLastGoodFeatureMeshSample(sample, -18d);
+    var yawRight = RotateLastGoodFeatureMeshSample(sample, 18d);
+    var stableYawLock = LastGoodFeatureMeshStabilityAnalyzer.Analyze([yawLeft, sample, yawRight]);
+    Require(stableYawLock.YawRangeDegrees >= 30d, $"last good feature stability analyzer did not retain B range: {stableYawLock.YawRangeDegrees:0.#}");
+    Require(stableYawLock.YawLeftSampleCount > 0 && stableYawLock.YawRightSampleCount > 0, "last good feature stability analyzer did not count left/right B samples");
+    Require(stableYawLock.YawHealthPercent >= 82d, $"last good feature stability analyzer treated rotated head samples as B-axis sliding: {stableYawLock.YawHealthPercent:0.#}%");
+    Require(
+        stableYawLock.YawFindings.Any(static finding => finding.Contains("stayed attached", StringComparison.OrdinalIgnoreCase)),
+        "last good feature stability analyzer did not report stable B-axis attachment");
+    var driftingYawMouth = ShiftLastGoodFeatureGroup(yawRight, "outer_lip", 0.18d, 0d, 0d);
+    var driftingYawLock = LastGoodFeatureMeshStabilityAnalyzer.Analyze([yawLeft, sample, driftingYawMouth]);
+    Require(driftingYawLock.YawHealthPercent < stableYawLock.YawHealthPercent, "last good feature stability analyzer did not reduce B health for mouth sliding during a turn");
+    Require(
+        driftingYawLock.YawFindings.Any(static finding => finding.Contains("while B range", StringComparison.OrdinalIgnoreCase)),
+        "last good feature stability analyzer did not emit B-specific sliding finding");
+    var offAxisPitchMouthDrift = ShiftLastGoodFeatureGroup(
+        TransformLastGoodFeatureMeshSample(sample, pitchDegrees: 12d),
+        "outer_lip",
+        0.18d,
+        0d,
+        0d);
+    var yawWithOffAxisDrift = LastGoodFeatureMeshStabilityAnalyzer.Analyze([yawLeft, sample, yawRight, offAxisPitchMouthDrift]);
+    Require(
+        yawWithOffAxisDrift.HealthPercent < stableYawLock.HealthPercent,
+        "last good feature stability analyzer did not keep overall drift sensitive to an off-axis feature shift");
+    Require(
+        yawWithOffAxisDrift.YawHealthPercent >= 82d,
+        $"B-axis health was contaminated by an A-axis-only drift sample: {yawWithOffAxisDrift.YawHealthPercent:0.#}%");
+    Require(
+        yawWithOffAxisDrift.YawComparedFeatureCount > 0,
+        "B-axis health did not expose its axis-specific compared feature count");
+    var aNegative = TransformLastGoodFeatureMeshSample(sample, pitchDegrees: -12d);
+    var aPositive = TransformLastGoodFeatureMeshSample(sample, pitchDegrees: 12d);
+    var stableALock = LastGoodFeatureMeshStabilityAnalyzer.Analyze([aNegative, sample, aPositive]);
+    Require(stableALock.ARangeDegrees >= 20d, $"last good feature stability analyzer did not retain A range: {stableALock.ARangeDegrees:0.#}");
+    Require(stableALock.ANegativeSampleCount > 0 && stableALock.APositiveSampleCount > 0, "last good feature stability analyzer did not count negative/positive A samples");
+    Require(stableALock.AHealthPercent >= 82d, $"last good feature stability analyzer treated A-axis tilt as sliding: {stableALock.AHealthPercent:0.#}%");
+    Require(stableALock.AComparedFeatureCount > 0, "A-axis health did not expose its axis-specific compared feature count");
+    Require(
+        stableALock.AFindings.Any(static finding => finding.Contains("A-axis", StringComparison.OrdinalIgnoreCase) && finding.Contains("stayed attached", StringComparison.OrdinalIgnoreCase)),
+        "last good feature stability analyzer did not report stable A-axis attachment");
+    var driftingAMouth = ShiftLastGoodFeatureGroup(aPositive, "outer_lip", 0.18d, 0d, 0d);
+    var driftingALock = LastGoodFeatureMeshStabilityAnalyzer.Analyze([aNegative, sample, driftingAMouth]);
+    Require(driftingALock.AHealthPercent < stableALock.AHealthPercent, "last good feature stability analyzer did not reduce A health for mouth sliding during A tilt");
+    Require(
+        driftingALock.AFindings.Any(static finding => finding.Contains("while A range", StringComparison.OrdinalIgnoreCase)),
+        "last good feature stability analyzer did not emit A-specific sliding finding");
+
+    var cNegative = TransformLastGoodFeatureMeshSample(sample, rollDegrees: -12d);
+    var cPositive = TransformLastGoodFeatureMeshSample(sample, rollDegrees: 12d);
+    var stableCLock = LastGoodFeatureMeshStabilityAnalyzer.Analyze([cNegative, sample, cPositive]);
+    Require(stableCLock.CRangeDegrees >= 20d, $"last good feature stability analyzer did not retain C range: {stableCLock.CRangeDegrees:0.#}");
+    Require(stableCLock.CNegativeSampleCount > 0 && stableCLock.CPositiveSampleCount > 0, "last good feature stability analyzer did not count negative/positive C samples");
+    Require(stableCLock.CHealthPercent >= 82d, $"last good feature stability analyzer treated C-axis tilt as sliding: {stableCLock.CHealthPercent:0.#}%");
+    Require(stableCLock.CComparedFeatureCount > 0, "C-axis health did not expose its axis-specific compared feature count");
+
+    var zFar = TransformLastGoodFeatureMeshSample(sample, scale: 0.84d);
+    var zClose = TransformLastGoodFeatureMeshSample(sample, scale: 1.16d);
+    var stableZLock = LastGoodFeatureMeshStabilityAnalyzer.Analyze([zFar, sample, zClose]);
+    Require(stableZLock.ZFaceScaleRangePercent >= 25d, $"last good feature stability analyzer did not retain Z face-scale range: {stableZLock.ZFaceScaleRangePercent:0.#}%");
+    Require(stableZLock.ZCloseSampleCount > 0 && stableZLock.ZFarSampleCount > 0, "last good feature stability analyzer did not count close/far Z samples");
+    Require(stableZLock.ZHealthPercent >= 82d, $"last good feature stability analyzer treated Z distance change as sliding: {stableZLock.ZHealthPercent:0.#}%");
+    Require(stableZLock.ZComparedFeatureCount > 0, "Z health did not expose its axis-specific compared feature count");
+    Require(
+        stableZLock.ZFindings.Any(static finding => finding.Contains("closer/farther", StringComparison.OrdinalIgnoreCase)),
+        "last good feature stability analyzer did not report stable Z distance attachment");
+
+    var root = Path.Combine(Path.GetTempPath(), $"episode-monitor-last-good-features-{Guid.NewGuid():N}");
+    Directory.CreateDirectory(root);
+    try
+    {
+        var files = new LastGoodFeatureMeshStore().Write(
+            root,
+            new LastGoodFeatureMeshReport
+            {
+                SubjectId = "chris",
+                SubjectDisplayName = "Chris",
+                Samples = [sample]
+            });
+        Require(File.Exists(files.JsonPath), "last good feature mesh JSON was not written");
+        Require(File.Exists(files.HtmlPath), "last good feature mesh HTML was not written");
+        var json = File.ReadAllText(files.JsonPath);
+        var html = File.ReadAllText(files.HtmlPath);
+        Require(json.Contains("\"schemaVersion\": \"last-good-feature-mesh-v1\"", StringComparison.Ordinal), "last good feature mesh JSON used the wrong schema");
+        Require(json.Contains("\"points\"", StringComparison.Ordinal), "last good feature mesh JSON omitted dense points");
+        Require(json.Contains("\"wireframeEdges\"", StringComparison.Ordinal), "last good feature mesh JSON omitted wireframe edges");
+        Require(json.Contains("\"featureGroups\"", StringComparison.Ordinal), "last good feature mesh JSON omitted feature groups");
+        Require(json.Contains("\"curated-facial-scaffold\"", StringComparison.Ordinal), "last good feature mesh JSON omitted curated facial scaffold edge provenance");
+        Require(json.Contains("\"headLockedStability\"", StringComparison.Ordinal), "last good feature mesh JSON omitted head-locked stability report");
+        Require(json.Contains("\"yawHealthPercent\"", StringComparison.Ordinal), "last good feature mesh JSON omitted B head-turn stability report");
+        Require(json.Contains("\"yawComparedFeatureCount\"", StringComparison.Ordinal), "last good feature mesh JSON omitted B axis-specific compared feature count");
+        Require(json.Contains("\"aHealthPercent\"", StringComparison.Ordinal), "last good feature mesh JSON omitted A tilt stability report");
+        Require(json.Contains("\"aComparedFeatureCount\"", StringComparison.Ordinal), "last good feature mesh JSON omitted A axis-specific compared feature count");
+        Require(json.Contains("\"cHealthPercent\"", StringComparison.Ordinal), "last good feature mesh JSON omitted C tilt stability report");
+        Require(json.Contains("\"cComparedFeatureCount\"", StringComparison.Ordinal), "last good feature mesh JSON omitted C axis-specific compared feature count");
+        Require(json.Contains("\"zHealthPercent\"", StringComparison.Ordinal), "last good feature mesh JSON omitted Z distance stability report");
+        Require(json.Contains("\"zComparedFeatureCount\"", StringComparison.Ordinal), "last good feature mesh JSON omitted Z axis-specific compared feature count");
+        Require(html.Contains("Last 10 Good Features", StringComparison.Ordinal), "last good feature mesh HTML omitted title");
+        Require(html.Contains("Head-Locked Stability", StringComparison.Ordinal), "last good feature mesh HTML omitted head-locked stability panel");
+        Require(html.Contains("B Head-Turn Findings", StringComparison.Ordinal), "last good feature mesh HTML omitted B head-turn findings");
+        Require(html.Contains("B head-turn lock", StringComparison.Ordinal), "last good feature mesh HTML omitted B head-turn lock status");
+        Require(html.Contains("A Tilt Findings", StringComparison.Ordinal), "last good feature mesh HTML omitted A tilt findings");
+        Require(html.Contains("C Tilt Findings", StringComparison.Ordinal), "last good feature mesh HTML omitted C tilt findings");
+        Require(html.Contains("Z Distance Findings", StringComparison.Ordinal), "last good feature mesh HTML omitted Z distance findings");
+        Require(html.Contains("meshReport", StringComparison.Ordinal), "last good feature mesh HTML omitted embedded scene data");
+        Require(html.Contains("Wireframe", StringComparison.Ordinal), "last good feature mesh HTML omitted wireframe control");
+        Require(html.Contains("Ghost Last 10", StringComparison.Ordinal), "last good feature mesh HTML omitted ghost comparison control");
+        Require(html.Contains("Head Lock", StringComparison.Ordinal), "last good feature mesh HTML omitted head-locked comparison control");
+        Require(html.Contains("Frame Axes", StringComparison.Ordinal), "last good feature mesh HTML omitted head frame axis control");
+        Require(html.Contains("head-locked view", StringComparison.Ordinal), "last good feature mesh HTML omitted head-locked coordinate mode");
+        Require(html.Contains("Head-local anchors", StringComparison.Ordinal), "last good feature mesh HTML omitted head-local anchor details");
+        Require(html.Contains("Brow tracking", StringComparison.Ordinal), "last good feature mesh HTML omitted brow tracking details");
+        Require(html.Contains("compared features", StringComparison.OrdinalIgnoreCase), "last good feature mesh HTML omitted axis-specific compared feature counts");
+        Require(html.Contains("auto-refreshes every 10 seconds", StringComparison.OrdinalIgnoreCase), "last good feature mesh HTML did not use the throttled refresh copy");
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static LastGoodFeatureMeshSample ShiftLastGoodFeatureGroup(
+    LastGoodFeatureMeshSample sample,
+    string featureGroupId,
+    double xOffset,
+    double yOffset,
+    double zOffset)
+{
+    var shiftedIndices = sample.FeatureGroups
+        .First(group => string.Equals(group.Id, featureGroupId, StringComparison.OrdinalIgnoreCase))
+        .LandmarkIndices
+        .ToHashSet();
+    return new LastGoodFeatureMeshSample
+    {
+        SampleId = $"{sample.SampleId}-shift-{featureGroupId}",
+        CapturedAtUtc = sample.CapturedAtUtc.AddMilliseconds(33),
+        Source = sample.Source,
+        DenseMeshTopology = sample.DenseMeshTopology,
+        PointCount = sample.PointCount,
+        TrackingConfidencePercent = sample.TrackingConfidencePercent,
+        EyeConfidencePercent = sample.EyeConfidencePercent,
+        MouthConfidencePercent = sample.MouthConfidencePercent,
+        OverallQualityPercent = sample.OverallQualityPercent,
+        EyeQualityPercent = sample.EyeQualityPercent,
+        MouthQualityPercent = sample.MouthQualityPercent,
+        BrowQualityPercent = sample.BrowQualityPercent,
+        FaceReliabilityPercent = sample.FaceReliabilityPercent,
+        FaceContinuityPercent = sample.FaceContinuityPercent,
+        EyeReliabilityPercent = sample.EyeReliabilityPercent,
+        MouthReliabilityPercent = sample.MouthReliabilityPercent,
+        HeadYawDegrees = sample.HeadYawDegrees,
+        HeadPitchDegrees = sample.HeadPitchDegrees,
+        HeadRollDegrees = sample.HeadRollDegrees,
+        XHorizontalPercent = sample.XHorizontalPercent,
+        YVerticalPercent = sample.YVerticalPercent,
+        DistanceInches = sample.DistanceInches,
+        ApparentDistanceUnits = sample.ApparentDistanceUnits,
+        RelativeDistanceScale = sample.RelativeDistanceScale,
+        InterEyeFrameWidthPercent = sample.InterEyeFrameWidthPercent,
+        ZConfidencePercent = sample.ZConfidencePercent,
+        DistanceCalibrated = sample.DistanceCalibrated,
+        ZUsesCameraFov = sample.ZUsesCameraFov,
+        ZUsesLearnedReference = sample.ZUsesLearnedReference,
+        ZEstimateKind = sample.ZEstimateKind,
+        ZQualityLabel = sample.ZQualityLabel,
+        RotationSource = sample.RotationSource,
+        DistanceSource = sample.DistanceSource,
+        ReferenceScaleSource = sample.ReferenceScaleSource,
+        LeftBrowHeightRatio = sample.LeftBrowHeightRatio,
+        RightBrowHeightRatio = sample.RightBrowHeightRatio,
+        AverageBrowHeightRatio = sample.AverageBrowHeightRatio,
+        BrowAsymmetryPercent = sample.BrowAsymmetryPercent,
+        PossibleOneEyeArtifact = sample.PossibleOneEyeArtifact,
+        LeftEyeReconstructed = sample.LeftEyeReconstructed,
+        RightEyeReconstructed = sample.RightEyeReconstructed,
+        MouthReconstructed = sample.MouthReconstructed,
+        EyeArtifactSuppressed = sample.EyeArtifactSuppressed,
+        CaptureQualityLabel = sample.CaptureQualityLabel,
+        CaptureQualityScorePercent = sample.CaptureQualityScorePercent,
+        GoodFeatureReason = sample.GoodFeatureReason,
+        FacialTransformationMatrix = sample.FacialTransformationMatrix.ToList(),
+        Points = sample.Points
+            .Select(point => new FaceMeshLandmarkPoint
+            {
+                Index = point.Index,
+                X = shiftedIndices.Contains(point.Index) ? point.X + xOffset : point.X,
+                Y = shiftedIndices.Contains(point.Index) ? point.Y + yOffset : point.Y,
+                Z = shiftedIndices.Contains(point.Index) ? point.Z + zOffset : point.Z
+            })
+            .ToList(),
+        FeatureGroups = sample.FeatureGroups
+            .Select(group => new LastGoodFeatureMeshFeatureGroup
+            {
+                Id = group.Id,
+                Label = group.Label,
+                Role = group.Role,
+                Closed = group.Closed,
+                ConfidencePercent = group.ConfidencePercent,
+                LandmarkIndices = group.LandmarkIndices.ToList()
+            })
+            .ToList(),
+        WireframeEdges = sample.WireframeEdges
+            .Select(edge => new LastGoodFeatureMeshWireframeEdge
+            {
+                FromIndex = edge.FromIndex,
+                ToIndex = edge.ToIndex,
+                Role = edge.Role,
+                Source = edge.Source,
+                LengthPercent = edge.LengthPercent,
+                ConfidencePercent = edge.ConfidencePercent
+            })
+            .ToList()
+    };
+}
+
+static LastGoodFeatureMeshSample RotateLastGoodFeatureMeshSample(
+    LastGoodFeatureMeshSample sample,
+    double yawDegrees)
+{
+    return TransformLastGoodFeatureMeshSample(sample, yawDegrees: yawDegrees);
+}
+
+static LastGoodFeatureMeshSample TransformLastGoodFeatureMeshSample(
+    LastGoodFeatureMeshSample sample,
+    double yawDegrees = 0d,
+    double pitchDegrees = 0d,
+    double rollDegrees = 0d,
+    double scale = 1d)
+{
+    var origin = new SyntheticMeshPoint(
+        sample.Points.Average(static point => point.X),
+        sample.Points.Average(static point => point.Y),
+        sample.Points.Average(static point => point.Z));
+    var yawRadians = yawDegrees * Math.PI / 180d;
+    var pitchRadians = pitchDegrees * Math.PI / 180d;
+    var rollRadians = rollDegrees * Math.PI / 180d;
+    var yawCos = Math.Cos(yawRadians);
+    var yawSin = Math.Sin(yawRadians);
+    var pitchCos = Math.Cos(pitchRadians);
+    var pitchSin = Math.Sin(pitchRadians);
+    var rollCos = Math.Cos(rollRadians);
+    var rollSin = Math.Sin(rollRadians);
+    var rotatedPoints = sample.Points
+        .Select(point =>
+        {
+            var dx = (point.X - origin.X) * scale;
+            var dy = (point.Y - origin.Y) * scale;
+            var dz = (point.Z - origin.Z) * scale;
+
+            var pitchY = dy * pitchCos - dz * pitchSin;
+            var pitchZ = dy * pitchSin + dz * pitchCos;
+            dy = pitchY;
+            dz = pitchZ;
+
+            var yawX = dx * yawCos + dz * yawSin;
+            var yawZ = -dx * yawSin + dz * yawCos;
+            dx = yawX;
+            dz = yawZ;
+
+            var rollX = dx * rollCos - dy * rollSin;
+            var rollY = dx * rollSin + dy * rollCos;
+            dx = rollX;
+            dy = rollY;
+
+            return new FaceMeshLandmarkPoint
+            {
+                Index = point.Index,
+                X = origin.X + dx,
+                Y = origin.Y + dy,
+                Z = origin.Z + dz
+            };
+        })
+        .ToList();
+
+    return new LastGoodFeatureMeshSample
+    {
+        SampleId = $"{sample.SampleId}-transform-y{yawDegrees:0.#}-p{pitchDegrees:0.#}-r{rollDegrees:0.#}-s{scale:0.##}",
+        CapturedAtUtc = sample.CapturedAtUtc.AddMilliseconds(Math.Abs(yawDegrees) + Math.Abs(pitchDegrees) + Math.Abs(rollDegrees) + Math.Abs(scale - 1d) * 100d),
+        Source = sample.Source,
+        DenseMeshTopology = sample.DenseMeshTopology,
+        PointCount = sample.PointCount,
+        TrackingConfidencePercent = sample.TrackingConfidencePercent,
+        EyeConfidencePercent = sample.EyeConfidencePercent,
+        MouthConfidencePercent = sample.MouthConfidencePercent,
+        OverallQualityPercent = sample.OverallQualityPercent,
+        EyeQualityPercent = sample.EyeQualityPercent,
+        MouthQualityPercent = sample.MouthQualityPercent,
+        BrowQualityPercent = sample.BrowQualityPercent,
+        FaceReliabilityPercent = sample.FaceReliabilityPercent,
+        FaceContinuityPercent = sample.FaceContinuityPercent,
+        EyeReliabilityPercent = sample.EyeReliabilityPercent,
+        MouthReliabilityPercent = sample.MouthReliabilityPercent,
+        HeadYawDegrees = yawDegrees,
+        HeadPitchDegrees = pitchDegrees,
+        HeadRollDegrees = rollDegrees,
+        XHorizontalPercent = sample.XHorizontalPercent,
+        YVerticalPercent = sample.YVerticalPercent,
+        DistanceInches = sample.DistanceInches,
+        ApparentDistanceUnits = sample.ApparentDistanceUnits,
+        RelativeDistanceScale = sample.RelativeDistanceScale,
+        InterEyeFrameWidthPercent = sample.InterEyeFrameWidthPercent,
+        ZConfidencePercent = sample.ZConfidencePercent,
+        DistanceCalibrated = sample.DistanceCalibrated,
+        ZUsesCameraFov = sample.ZUsesCameraFov,
+        ZUsesLearnedReference = sample.ZUsesLearnedReference,
+        ZEstimateKind = sample.ZEstimateKind,
+        ZQualityLabel = sample.ZQualityLabel,
+        RotationSource = sample.RotationSource,
+        DistanceSource = sample.DistanceSource,
+        ReferenceScaleSource = sample.ReferenceScaleSource,
+        LeftBrowHeightRatio = sample.LeftBrowHeightRatio,
+        RightBrowHeightRatio = sample.RightBrowHeightRatio,
+        AverageBrowHeightRatio = sample.AverageBrowHeightRatio,
+        BrowAsymmetryPercent = sample.BrowAsymmetryPercent,
+        PossibleOneEyeArtifact = sample.PossibleOneEyeArtifact,
+        LeftEyeReconstructed = sample.LeftEyeReconstructed,
+        RightEyeReconstructed = sample.RightEyeReconstructed,
+        MouthReconstructed = sample.MouthReconstructed,
+        EyeArtifactSuppressed = sample.EyeArtifactSuppressed,
+        CaptureQualityLabel = sample.CaptureQualityLabel,
+        CaptureQualityScorePercent = sample.CaptureQualityScorePercent,
+        GoodFeatureReason = sample.GoodFeatureReason,
+        FacialTransformationMatrix = sample.FacialTransformationMatrix.ToList(),
+        Points = rotatedPoints,
+        WireframeEdges = sample.WireframeEdges
+            .Select(edge => new LastGoodFeatureMeshWireframeEdge
+            {
+                FromIndex = edge.FromIndex,
+                ToIndex = edge.ToIndex,
+                Role = edge.Role,
+                Source = edge.Source,
+                LengthPercent = edge.LengthPercent,
+                ConfidencePercent = edge.ConfidencePercent
+            })
+            .ToList(),
+        FeatureGroups = sample.FeatureGroups
+            .Select(group => new LastGoodFeatureMeshFeatureGroup
+            {
+                Id = group.Id,
+                Label = group.Label,
+                Role = group.Role,
+                Closed = group.Closed,
+                ConfidencePercent = group.ConfidencePercent,
+                LandmarkIndices = group.LandmarkIndices.ToList()
+            })
+            .ToList()
+    };
 }
 
 static void ValidateMeasurementFacePreviewGeometry(MeasurementFacePreviewModel preview, string label)
@@ -2260,6 +4236,143 @@ static void ValidateMeasurementFacePreviewGeometry(MeasurementFacePreviewModel p
         preview.TemplatePriorContributionPercent,
         preview.GeometryProvenance,
         label);
+}
+
+static double PreviewMetric(MeasurementFacePreviewModel preview, string key)
+{
+    return preview.Metrics.TryGetValue(key, out var value) && value is double number
+        ? number
+        : 0d;
+}
+
+static double RoleZRange(MeasurementFacePreviewModel preview, string role)
+{
+    var values = preview.Points
+        .Where(point => string.Equals(point.Role, role, StringComparison.OrdinalIgnoreCase))
+        .Select(static point => point.Z)
+        .ToList();
+    return values.Count == 0 ? 0d : values.Max() - values.Min();
+}
+
+static void ValidateMeasurementFacePreviewSurfacePatches(
+    IReadOnlyList<MeasurementFacePreviewPoint> points,
+    IReadOnlyList<MeasurementFacePreviewSurfacePatch> patches,
+    string label,
+    bool requireMeasuredPatches)
+{
+    if (requireMeasuredPatches)
+    {
+        Require(patches.Count >= 8, $"{label} has too few measured surface patches: {patches.Count}");
+        var requiredRoles = new[] { "eye", "mouth", "mouth-opening", "jaw", "nose", "brow", "forehead", "cheek" };
+        var roles = patches.Select(static patch => patch.Role).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var role in requiredRoles)
+        {
+            Require(roles.Contains(role), $"{label} omitted measured {role} surface patch");
+        }
+    }
+
+    var pointMap = points.ToDictionary(static point => point.Id, StringComparer.OrdinalIgnoreCase);
+    var patchIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    foreach (var patch in patches)
+    {
+        Require(!string.IsNullOrWhiteSpace(patch.Id), $"{label} emitted a surface patch without an id");
+        Require(patchIds.Add(patch.Id), $"{label} emitted duplicate surface patch id '{patch.Id}'");
+        Require(!string.IsNullOrWhiteSpace(patch.Role), $"{label} surface patch '{patch.Id}' omitted a role");
+        Require(!string.IsNullOrWhiteSpace(patch.Provenance), $"{label} surface patch '{patch.Id}' omitted provenance");
+        Require(patch.ConfidencePercent is >= 0d and <= 100d, $"{label} surface patch '{patch.Id}' has invalid confidence: {patch.ConfidencePercent}");
+        Require(patch.FillOpacity is >= 0d and <= 1d, $"{label} surface patch '{patch.Id}' has invalid fill opacity: {patch.FillOpacity}");
+        Require(!string.IsNullOrWhiteSpace(patch.CenterPointId), $"{label} surface patch '{patch.Id}' omitted its center point id");
+        Require(patch.PointIds.Count >= 3, $"{label} surface patch '{patch.Id}' has too few point references");
+        Require(patch.TriangleCount == patch.Triangles.Count, $"{label} surface patch '{patch.Id}' triangle count drifted from triangle cells");
+        Require(patch.Triangles.Count >= patch.PointIds.Count, $"{label} surface patch '{patch.Id}' has too few measured triangles: {patch.Triangles.Count}");
+        Require(patch.SurfaceArea > 0d, $"{label} surface patch '{patch.Id}' omitted surface area");
+        Require(patch.AverageTriangleArea > 0d, $"{label} surface patch '{patch.Id}' omitted average triangle area");
+        Require(patch.DepthRelief >= 0d, $"{label} surface patch '{patch.Id}' emitted invalid depth relief");
+        Require(double.IsFinite(patch.AverageNormalX) && double.IsFinite(patch.AverageNormalY) && double.IsFinite(patch.AverageNormalZ), $"{label} surface patch '{patch.Id}' emitted non-finite normal");
+        var normalMagnitude = Math.Sqrt(
+            patch.AverageNormalX * patch.AverageNormalX
+            + patch.AverageNormalY * patch.AverageNormalY
+            + patch.AverageNormalZ * patch.AverageNormalZ);
+        Require(normalMagnitude is > 0.90d and < 1.10d, $"{label} surface patch '{patch.Id}' normal was not unit length: {normalMagnitude}");
+        Require(patch.AverageNormalZ >= 0d, $"{label} surface patch '{patch.Id}' average normal does not face the camera");
+        Require(patch.NormalConsistencyPercent is >= 0d and <= 100d, $"{label} surface patch '{patch.Id}' has invalid normal consistency: {patch.NormalConsistencyPercent}");
+        Require(patch.GeometryHealthPercent is >= 0d and <= 100d, $"{label} surface patch '{patch.Id}' has invalid geometry health: {patch.GeometryHealthPercent}");
+        Require(!string.IsNullOrWhiteSpace(patch.GeometryStatus), $"{label} surface patch '{patch.Id}' omitted geometry status");
+        Require(!string.IsNullOrWhiteSpace(patch.GeometryFinding), $"{label} surface patch '{patch.Id}' omitted geometry finding");
+        if (requireMeasuredPatches)
+        {
+            Require(patch.NormalConsistencyPercent > 40d, $"{label} measured surface patch '{patch.Id}' normal consistency is too weak: {patch.NormalConsistencyPercent}");
+        }
+
+        var patchPointIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var patchPoints = new List<MeasurementFacePreviewPoint>(patch.PointIds.Count);
+        foreach (var pointId in patch.PointIds)
+        {
+            Require(patchPointIds.Add(pointId), $"{label} surface patch '{patch.Id}' repeats point '{pointId}'");
+            if (!pointMap.TryGetValue(pointId, out var point))
+            {
+                throw new InvalidOperationException($"{label} surface patch '{patch.Id}' references missing point '{pointId}'");
+            }
+
+            patchPoints.Add(point);
+            if (requireMeasuredPatches)
+            {
+                Require(
+                    point.Provenance.Contains("personal", StringComparison.OrdinalIgnoreCase),
+                    $"{label} measured surface patch '{patch.Id}' referenced non-personal point '{pointId}'");
+            }
+        }
+
+        var projectedPatch = patchPoints
+            .Select(point => ProjectMeasurementFacePreviewPoint(point, 960d, 560d, -0.34d, -0.08d, 1d))
+            .ToList();
+        var span = CalculateProjectedSpan(projectedPatch);
+        Require(span > 1.0d, $"{label} surface patch '{patch.Id}' collapses to a degenerate 3D projection");
+
+        var referencedBoundaryIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var triangle in patch.Triangles)
+        {
+            Require(triangle.PointIds.Count == 3, $"{label} surface patch '{patch.Id}' emitted a non-triangle cell");
+            var trianglePointIds = triangle.PointIds.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            Require(trianglePointIds.Count == 3, $"{label} surface patch '{patch.Id}' emitted a triangle with repeated points");
+            Require(trianglePointIds.Contains(patch.CenterPointId), $"{label} surface patch '{patch.Id}' emitted a triangle without the center point");
+            var trianglePoints = new List<MeasurementFacePreviewPoint>(3);
+            foreach (var pointId in triangle.PointIds)
+            {
+                if (!pointMap.TryGetValue(pointId, out var point))
+                {
+                    throw new InvalidOperationException($"{label} surface patch '{patch.Id}' triangle references missing point '{pointId}'");
+                }
+
+                trianglePoints.Add(point);
+                if (patchPointIds.Contains(pointId))
+                {
+                    referencedBoundaryIds.Add(pointId);
+                }
+
+                if (requireMeasuredPatches)
+                {
+                    Require(
+                        point.Provenance.Contains("personal", StringComparison.OrdinalIgnoreCase),
+                        $"{label} measured surface patch '{patch.Id}' triangle referenced non-personal point '{pointId}'");
+                }
+            }
+
+            Require(
+                trianglePointIds.Count(pointId => patchPointIds.Contains(pointId)) >= 2,
+                $"{label} surface patch '{patch.Id}' triangle does not attach to two measured boundary points");
+            var projectedTriangle = trianglePoints
+                .Select(point => ProjectMeasurementFacePreviewPoint(point, 960d, 560d, -0.34d, -0.08d, 1d))
+                .ToList();
+            var area = CalculateProjectedTriangleArea(projectedTriangle);
+            Require(area > 0.05d, $"{label} surface patch '{patch.Id}' emitted a degenerate projected triangle");
+        }
+
+        foreach (var pointId in patchPointIds)
+        {
+            Require(referencedBoundaryIds.Contains(pointId), $"{label} surface patch '{patch.Id}' boundary point '{pointId}' was not used by a triangle");
+        }
+    }
 }
 
 static void ValidateMeasurementFacePreviewScene(
@@ -2339,7 +4452,7 @@ static void ValidateMeasurementFacePreviewScene(
     var rightYaw = ProjectMeasurementFacePreviewPoint(depthCuePoint, 960d, 560d, 0.34d, -0.08d, 1d);
     Require(
         Math.Abs(leftYaw.X - rightYaw.X) > 8d,
-        $"{label} did not respond visibly to yaw rotation around depth point '{depthCuePoint.Id}'");
+        $"{label} did not respond visibly to B rotation around depth point '{depthCuePoint.Id}'");
 
     var edgePoint = points.OrderByDescending(static point => Math.Abs(point.X) + Math.Abs(point.Y)).First();
     var baseZoom = ProjectMeasurementFacePreviewPoint(edgePoint, 960d, 560d, -0.34d, -0.08d, 1d);
@@ -2394,6 +4507,19 @@ static double CalculateProjectedSpan(IReadOnlyList<MeasurementPreviewProjectedPo
     var spanX = points.Max(static point => point.X) - points.Min(static point => point.X);
     var spanY = points.Max(static point => point.Y) - points.Min(static point => point.Y);
     return Math.Sqrt(spanX * spanX + spanY * spanY);
+}
+
+static double CalculateProjectedTriangleArea(IReadOnlyList<MeasurementPreviewProjectedPoint> points)
+{
+    if (points.Count != 3)
+    {
+        return 0d;
+    }
+
+    return Math.Abs(
+        points[0].X * (points[1].Y - points[2].Y)
+        + points[1].X * (points[2].Y - points[0].Y)
+        + points[2].X * (points[0].Y - points[1].Y)) / 2d;
 }
 
 static double DistanceFromCanvasCenter(MeasurementPreviewProjectedPoint point, double width, double height)
@@ -2455,6 +4581,13 @@ static void RunMeasurementAvatarTrainingPackageSmoke()
         OuterLipShape = ShapeProfile("outer_lip_shape", "Outer lip contour shape", 12, closed: true, sampleCount: 150, totalWeight: 132d),
         InnerLipShape = ShapeProfile("inner_lip_shape", "Inner lip contour shape", 10, closed: true, sampleCount: 150, totalWeight: 132d),
         JawShape = ShapeProfile("jaw_shape", "Jaw contour shape", 9, closed: false, sampleCount: 150, totalWeight: 132d),
+        LeftBrowShape = SurfaceProfile("left_brow_shape", "Left brow 3D shape", 10, sampleCount: 150, totalWeight: 132d, depth: 0.035d),
+        RightBrowShape = SurfaceProfile("right_brow_shape", "Right brow 3D shape", 10, sampleCount: 150, totalWeight: 132d, depth: 0.035d),
+        NoseBridgeShape = SurfaceProfile("nose_bridge_shape", "Nose bridge 3D shape", 10, sampleCount: 150, totalWeight: 132d, depth: 0.09d),
+        NoseBaseShape = SurfaceProfile("nose_base_shape", "Nose base 3D shape", 5, sampleCount: 150, totalWeight: 132d, depth: 0.065d),
+        LeftCheekSurface = SurfaceProfile("left_cheek_surface", "Left cheek 3D surface", 6, sampleCount: 150, totalWeight: 132d, depth: 0.025d),
+        RightCheekSurface = SurfaceProfile("right_cheek_surface", "Right cheek 3D surface", 6, sampleCount: 150, totalWeight: 132d, depth: 0.025d),
+        ForeheadSurface = SurfaceProfile("forehead_surface", "Forehead 3D surface", 9, sampleCount: 150, totalWeight: 132d, depth: 0.02d),
         PoseBuckets = PoseBucketProfiles(sampleCount: 72, totalWeight: 64d)
     };
 
@@ -2501,6 +4634,39 @@ static void RunMeasurementAvatarTrainingPackageSmoke()
         manualSubjectConfirmed: true,
         identityConfidencePercent: 95d,
         reason: "avatar package smoke subject confirmed");
+    var packageAudit = new PersonalFaceCollectionAuditBuilder().Build(
+        model,
+        observations.Select((observation, index) => new PersonalFaceCollectionAuditObservation
+        {
+            ReviewedAtUtc = observation.CapturedAtUtc,
+            SubjectConfirmed = true,
+            PausedForEventOrCalibration = false,
+            HasFace = true,
+            PersonalModelAccepted = true,
+            PersonalModelRejectionKind = "",
+            PersonalModelUpdateReason = "avatar package smoke accepted",
+            CaptureQualityLabel = "avatar-grade",
+            CaptureQualityScorePercent = 88d,
+            CaptureQualityCanCollect = true,
+            CaptureQualityAvatarGrade = true,
+            CaptureQualityReason = "strong synthetic avatar package audit frame",
+            CaptureQualityCameraModeScorePercent = 92d,
+            CaptureQualityFaceScaleScorePercent = 90d,
+            CaptureQualityEyeScorePercent = 86d,
+            CaptureQualityMouthScorePercent = 84d,
+            CaptureQualityStabilityScorePercent = 87d,
+            CaptureQualityGlassesScorePercent = 82d,
+            CaptureQualityStorageScorePercent = 100d,
+            CaptureQualityFaceWidthPercent = 40d,
+            CaptureQualityFaceHeightPercent = 58d,
+            IdentityMeasurementAvailable = true,
+            IdentityAutoGateReady = true,
+            IdentityWarmupStrongMismatchGateReady = true,
+            IdentityConfidencePercent = 94d - index % 5,
+            IdentityComparedFeatureCount = 8,
+            IdentityOutlierFeatureCount = index % 37 == 0 ? 1 : 0,
+            IdentityStatus = "accepted"
+        }).ToList());
 
     var package = new MeasurementAvatarTrainingPackageBuilder().Build(
         model,
@@ -2508,7 +4674,8 @@ static void RunMeasurementAvatarTrainingPackageSmoke()
         readiness,
         acceptedGate,
         measurementJournalBytes: 12_345L,
-        measurementBudgetBytes: 1_000_000L);
+        measurementBudgetBytes: 1_000_000L,
+        collectionAudit: packageAudit);
     Require(package.CanUseForAvatarTraining, "measurement avatar package did not allow subject-gated training use");
     Require(package.NeutralFaceProfile.ContainsKey("AverageEyeOpeningRatio"), "measurement avatar package omitted average eye opening");
     Require(package.MotionProfile.ContainsKey("EyeClosingVelocityPerSecond"), "measurement avatar package omitted eye closing velocity");
@@ -2517,11 +4684,47 @@ static void RunMeasurementAvatarTrainingPackageSmoke()
     Require(package.PoseCoverageProfile.Any(static bucket => bucket.BucketId == PersonalFacePoseBuckets.FrontNeutral && bucket.SampleCount > 0), "measurement avatar package omitted front-neutral pose bucket");
     Require(package.Readiness.PoseBucketCoveragePercent > 0d, "measurement avatar package omitted pose bucket readiness");
     Require(package.ContourShapeProfiles.ContainsKey("left_eye_shape") && package.ContourShapeProfiles.ContainsKey("inner_lip_shape"), "measurement avatar package omitted aggregate contour shape profiles");
+    Require(package.ContourShapeProfiles.ContainsKey("nose_bridge_shape") && package.ContourShapeProfiles.ContainsKey("left_cheek_surface"), "measurement avatar package omitted aggregate surface shape profiles");
     Require(package.Readiness.ContourShapeCoveragePercent > 0d, "measurement avatar package omitted contour shape readiness");
+    Require(package.Readiness.SurfaceShapeCoveragePercent > 0d, "measurement avatar package omitted surface shape readiness");
+    Require(package.Readiness.SurfaceGeometryHealthPercent > 0d, "measurement avatar package omitted surface geometry readiness");
+    Require(package.Readiness.XYZABCCoveragePercent > 0d, "measurement avatar package omitted XYZABC readiness");
     Require(package.Readiness.DirectFeatureMeasurementTrustPercent > 0d, "measurement avatar package omitted direct feature trust readiness");
+    Require(package.Readiness.ApertureConsistencyHealthPercent > 0d, "measurement avatar package omitted aperture consistency readiness");
+    Require(package.Readiness.EyeApertureReliabilityHealthPercent > 0d, "measurement avatar package omitted eye aperture reliability readiness");
+    Require(package.Readiness.DataAuditHealthPercent > 0d, "measurement avatar package omitted data audit readiness");
+    Require(package.Readiness.PoseEstimationHealthPercent > 0d, "measurement avatar package omitted pose estimation audit readiness");
+    Require(package.Readiness.FeatureAnchoringHealthPercent > 0d, "measurement avatar package omitted feature anchoring audit readiness");
+    Require(package.Readiness.PoseExplainedFeatureMotionHealthPercent > 0d, "measurement avatar package omitted pose-explained feature motion readiness");
+    Require(package.Readiness.PoseBucketConsistencyHealthPercent > 0d, "measurement avatar package omitted pose-bucket consistency readiness");
+    Require(package.Readiness.IdentitySessionHealthPercent > 0d, "measurement avatar package omitted identity-session readiness");
+    Require(!string.IsNullOrWhiteSpace(package.Readiness.IdentitySessionAuditStage), "measurement avatar package omitted identity-session audit stage");
+    Require(!string.IsNullOrWhiteSpace(package.Readiness.IdentitySessionAuditStatus), "measurement avatar package omitted identity-session audit status");
+    Require(package.PoseBucketConsistency.ComparedPoseBucketCount > 0, "measurement avatar package omitted pose-bucket consistency comparisons");
     Require(package.QualityProfile.ContainsKey("EyeGlarePercent"), "measurement avatar package omitted eye glare quality context");
+    Require(package.QualityProfile.ContainsKey("ApertureConsistencyHealthPercent"), "measurement avatar package omitted aperture consistency quality context");
+    Require(package.QualityProfile.ContainsKey("EyeApertureReliabilityHealthPercent"), "measurement avatar package omitted eye aperture reliability quality context");
+    Require(package.QualityProfile.ContainsKey("PossibleOneEyeArtifactRate"), "measurement avatar package omitted possible one-eye artifact quality context");
+    Require(package.QualityProfile.ContainsKey("DataAuditHealthPercent"), "measurement avatar package omitted data audit quality context");
+    Require(package.QualityProfile.ContainsKey("PoseExplainedFeatureMotionHealthPercent"), "measurement avatar package omitted pose-explained feature motion quality context");
+    Require(package.QualityProfile.ContainsKey("PoseBucketConsistencyHealthPercent"), "measurement avatar package omitted pose-bucket consistency quality context");
+    Require(package.QualityProfile.ContainsKey("SurfaceGeometryHealthPercent"), "measurement avatar package omitted surface geometry quality context");
+    Require(package.QualityProfile.ContainsKey("IdentitySessionHealthPercent"), "measurement avatar package omitted identity-session quality context");
+    Require(package.QualityProfile.ContainsKey("MinimumTrackedDistributionWeight"), "measurement avatar package omitted weakest tracked distribution weight quality context");
+    Require(package.NeutralFaceProfile.ContainsKey("ARotationAroundXDegrees"), "measurement avatar package omitted A/X neutral rotation context");
+    Require(package.NeutralFaceProfile.ContainsKey("BRotationAroundYDegrees"), "measurement avatar package omitted B/Y neutral rotation context");
+    Require(package.NeutralFaceProfile.ContainsKey("CRotationAroundZDegrees"), "measurement avatar package omitted C/Z neutral rotation context");
+    Require(package.MotionProfile.ContainsKey("ARotationAroundXVelocityDegreesPerSecond"), "measurement avatar package omitted A/X rotation velocity context");
+    Require(package.MotionProfile.ContainsKey("BRotationAroundYVelocityDegreesPerSecond"), "measurement avatar package omitted B/Y rotation velocity context");
+    Require(package.MotionProfile.ContainsKey("CRotationAroundZVelocityDegreesPerSecond"), "measurement avatar package omitted C/Z rotation velocity context");
+    Require(package.QualityProfile.ContainsKey("BRotationAroundYRangeDegrees"), "measurement avatar package omitted B/Y range audit context");
+    Require(package.QualityProfile.ContainsKey("InterEyeDistanceToFaceWidthRange"), "measurement avatar package omitted face-local feature drift context");
+    Require(package.QualityProfile.ContainsKey("AverageIdentityConfidencePercent"), "measurement avatar package omitted collection identity confidence context");
+    Require(package.QualityProfile.ContainsKey("IdentityOutlierFrames"), "measurement avatar package omitted identity outlier frame context");
+    Require(package.QualityProfile.ContainsKey("TrackingAuditHoldFrames"), "measurement avatar package omitted tracking audit hold context");
     Require(package.SourceArtifacts.All(static artifact => !artifact.ContainsRawPixels && !artifact.ContainsRawContinuousVideo), "measurement avatar package marked source artifacts as raw media");
     Require(package.SourceArtifacts.Any(static artifact => artifact.Kind == "low-trust-template-prior"), "measurement avatar package omitted low-trust template prior artifact");
+    Require(package.SourceArtifacts.Any(static artifact => artifact.Kind == "data-audit"), "measurement avatar package omitted data audit artifact");
     Require(package.MeasurementContributionPercent > 90d, $"measurement avatar package measured contribution too low: {package.MeasurementContributionPercent}");
     Require(package.TemplatePriorContributionPercent < 10d, $"measurement avatar package retained too much template prior: {package.TemplatePriorContributionPercent}");
     Require(package.SafetyBoundary.Contains("digital representation", StringComparison.OrdinalIgnoreCase), "measurement avatar package omitted digital-representation safety boundary");
@@ -2573,17 +4776,69 @@ static void RunMeasurementAvatarTrainingPackageSmoke()
     Require(json.Contains("\"PoseCoverageProfile\"", StringComparison.Ordinal), "measurement avatar package JSON did not include pose coverage profile");
     Require(json.Contains("\"PoseBucketCoveragePercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include pose bucket readiness");
     Require(json.Contains("\"ContourShapeCoveragePercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include contour shape readiness");
+    Require(json.Contains("\"SurfaceShapeCoveragePercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include surface shape readiness");
+    Require(json.Contains("\"SurfaceGeometryHealthPercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include surface geometry readiness");
+    Require(json.Contains("\"XYZABCCoveragePercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include XYZABC readiness");
+    Require(json.Contains("\"nose_bridge_shape\"", StringComparison.Ordinal), "measurement avatar package JSON did not include nose bridge surface profile");
     Require(json.Contains("\"DirectFeatureMeasurementTrustPercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include direct feature trust");
+    Require(json.Contains("\"ApertureConsistencyHealthPercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include aperture consistency health");
+    Require(json.Contains("\"ApertureConsistency\"", StringComparison.Ordinal), "measurement avatar package JSON did not include aperture consistency report");
+    Require(json.Contains("\"EyeApertureReliabilityHealthPercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include eye aperture reliability health");
+    Require(json.Contains("\"PossibleOneEyeArtifactRate\"", StringComparison.Ordinal), "measurement avatar package JSON did not include possible one-eye artifact rate");
+    Require(json.Contains("\"DataAuditHealthPercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include data audit health");
+    Require(json.Contains("\"PoseEstimationHealthPercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include pose estimation health");
+    Require(json.Contains("\"FeatureAnchoringHealthPercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include feature anchoring health");
+    Require(json.Contains("\"PoseExplainedFeatureMotionHealthPercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include pose-explained feature motion health");
+    Require(json.Contains("\"PoseBucketConsistencyHealthPercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include pose-bucket consistency health");
+    Require(json.Contains("\"PoseBucketConsistency\"", StringComparison.Ordinal), "measurement avatar package JSON did not include pose-bucket consistency report");
+    Require(json.Contains("\"PoseAxisHealthPercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include pose-axis health");
+    Require(json.Contains("\"IdentitySessionHealthPercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include identity-session health");
+    Require(json.Contains("\"IdentitySessionAuditStage\"", StringComparison.Ordinal), "measurement avatar package JSON did not include identity-session audit stage");
+    Require(json.Contains("\"IdentitySessionAuditStatus\"", StringComparison.Ordinal), "measurement avatar package JSON did not include identity-session audit status");
+    Require(json.Contains("\"AverageIdentityConfidencePercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include collection identity confidence");
+    Require(json.Contains("\"IdentityOutlierFrames\"", StringComparison.Ordinal), "measurement avatar package JSON did not include identity outlier frames");
+    Require(json.Contains("\"TrackingAuditHoldFrames\"", StringComparison.Ordinal), "measurement avatar package JSON did not include tracking audit hold frames");
+    Require(json.Contains("\"MinimumTrackedDistributionWeight\"", StringComparison.Ordinal), "measurement avatar package JSON did not include weakest tracked distribution weight");
     Require(json.Contains("\"TemplatePriorContributionPercent\"", StringComparison.Ordinal), "measurement avatar package JSON did not include template-prior contribution");
     Require(html.Contains("Contour Shape Profiles", StringComparison.Ordinal), "measurement avatar package HTML did not include contour shape profile summary");
+    Require(html.Contains("XYZABC", StringComparison.Ordinal), "measurement avatar package HTML did not include XYZABC score");
     Require(html.Contains("Pose Coverage Profile", StringComparison.Ordinal), "measurement avatar package HTML did not include pose coverage profile");
     Require(html.Contains("template prior contribution", StringComparison.OrdinalIgnoreCase), "measurement avatar package HTML did not include template-prior contribution");
     Require(html.Contains("Contour Shape", StringComparison.Ordinal), "measurement avatar package HTML did not include contour shape readiness score");
+    Require(html.Contains("Surface Geometry", StringComparison.Ordinal), "measurement avatar package HTML did not include surface geometry readiness score");
     Require(html.Contains("Direct Feature Trust", StringComparison.Ordinal), "measurement avatar package HTML did not include direct feature trust score");
+    Require(html.Contains("Aperture Consistency", StringComparison.Ordinal), "measurement avatar package HTML did not include aperture consistency score");
+    Require(html.Contains("Data Audit", StringComparison.Ordinal), "measurement avatar package HTML did not include data audit readiness score");
+    Require(html.Contains("Pose Estimation", StringComparison.Ordinal), "measurement avatar package HTML did not include pose estimation audit score");
+    Require(html.Contains("Feature Anchoring", StringComparison.Ordinal), "measurement avatar package HTML did not include feature anchoring audit score");
+    Require(html.Contains("Pose Bucket Consistency", StringComparison.Ordinal), "measurement avatar package HTML did not include pose-bucket consistency audit score");
+    Require(html.Contains("Axis reason", StringComparison.Ordinal), "measurement avatar package HTML did not include pose-axis audit detail");
+    Require(html.Contains("Identity Session", StringComparison.Ordinal), "measurement avatar package HTML did not include identity-session readiness score");
+    Require(html.Contains("Identity session status", StringComparison.Ordinal), "measurement avatar package HTML did not include identity-session audit status");
+    Require(html.Contains("Weakest tracked weight", StringComparison.Ordinal), "measurement avatar package HTML did not include weakest tracked distribution weight");
+    Require(html.Contains("Identity confidence", StringComparison.Ordinal), "measurement avatar package HTML did not include identity-confidence quality metric");
     Require(json.Contains("\"ContainsRawPixels\": false", StringComparison.Ordinal), "measurement avatar package JSON did not mark artifacts as pixel-free");
     Require(!json.Contains("FaceContour", StringComparison.Ordinal) && !json.Contains("LeftEyeContour", StringComparison.Ordinal), "measurement avatar package leaked raw contour names");
     Require(!html.Contains("data:image", StringComparison.OrdinalIgnoreCase), "measurement avatar package HTML embedded image data");
     Directory.Delete(packageRoot, recursive: true);
+}
+
+static void RunEpisodeMonitorStartupOptionsSmoke()
+{
+    var easy = EpisodeMonitorStartupOptions.Parse(["--easy-avatar", "--output-folder", @"D:\Episode Monitor Output"]);
+    Require(easy.EasyAvatarMode, "startup options did not enable easy avatar mode");
+    Require(easy.OpenAvatarSystem, "easy avatar mode did not imply opening the Avatar System");
+    Require(easy.StartAvatarLearning, "easy avatar mode did not imply avatar learning request");
+    Require(easy.OutputFolder == @"D:\Episode Monitor Output", $"startup options did not parse separated output folder: {easy.OutputFolder}");
+
+    var makeAvatar = EpisodeMonitorStartupOptions.Parse(["/make-avatar", "/output=E:\\Avatar Data"]);
+    Require(makeAvatar.EasyAvatarMode && makeAvatar.OpenAvatarSystem && makeAvatar.StartAvatarLearning, "make-avatar alias did not match easy avatar behavior");
+    Require(makeAvatar.OutputFolder == @"E:\Avatar Data", $"startup options did not parse inline output folder: {makeAvatar.OutputFolder}");
+
+    var explicitFalse = EpisodeMonitorStartupOptions.Parse(["--easy-avatar=false", "--open-avatar-system"]);
+    Require(!explicitFalse.EasyAvatarMode, "explicit false easy avatar option was not honored");
+    Require(explicitFalse.OpenAvatarSystem, "open avatar system option was not honored after explicit false easy avatar");
+    Require(!explicitFalse.StartAvatarLearning, "explicit false easy avatar unexpectedly requested learning");
 }
 
 static void RunMeasurementAvatarCapturePlanSmoke()
@@ -2654,6 +4909,10 @@ static void RunMeasurementAvatarCapturePlanSmoke()
         InnerLipShapeSamples = 36,
         JawShapeSamples = 36,
         ContourShapeCoveragePercent = 10d,
+        SurfaceGeometryHealthPercent = 24d,
+        SurfaceGeometryPatchCount = 8,
+        SurfaceGeometryReviewPatchCount = 3,
+        SurfaceGeometryStatus = "3 patch(es) need review",
         EyeBehindGlassesTrustPercent = 12d,
         MouthJawTrustPercent = 18d,
         DirectFeatureMeasurementTrustPercent = 15d,
@@ -2678,8 +4937,22 @@ static void RunMeasurementAvatarCapturePlanSmoke()
     Require(plan.Items.Any(static item => item.Id == "expression-ladder"), "measurement avatar capture plan omitted expression ladder task");
     Require(plan.Items.Any(static item => item.Id == "identity-lock"), "measurement avatar capture plan omitted identity task");
     Require(plan.Items.Any(static item => item.Id == "contour-shape-pass"), "measurement avatar capture plan omitted contour shape task");
+    Require(plan.Items.Any(static item => item.Id == "surface-geometry-review-pass"), "measurement avatar capture plan omitted surface geometry review task");
     Require(plan.Items.Any(static item => item.Id == "eye-glasses-trust"), "measurement avatar capture plan omitted eye trust task");
     Require(plan.Items.Any(static item => item.Id == "mouth-jaw-trust"), "measurement avatar capture plan omitted mouth/jaw trust task");
+    Require(plan.Items.Any(static item => item.Id == "aperture-corroboration"), "measurement avatar capture plan omitted aperture corroboration task");
+    var poseSweep = plan.Items.FirstOrDefault(static item => item.Id == "pose-sweep");
+    Require(poseSweep is not null, "measurement avatar capture plan omitted pose sweep task");
+    var poseSweepItem = poseSweep ?? throw new InvalidOperationException("measurement avatar capture plan omitted pose sweep task");
+    Require(
+        poseSweepItem.Instructions.Contains("three-quarter", StringComparison.OrdinalIgnoreCase)
+        && poseSweepItem.Instructions.Contains("near-side", StringComparison.OrdinalIgnoreCase),
+        "measurement avatar capture plan did not ask for three-quarter and side pose evidence");
+    Require(
+        poseSweepItem.WhyItMatters.Contains("nose projection", StringComparison.OrdinalIgnoreCase)
+        && poseSweepItem.WhyItMatters.Contains("cheek", StringComparison.OrdinalIgnoreCase)
+        && poseSweepItem.WhyItMatters.Contains("forehead depth", StringComparison.OrdinalIgnoreCase),
+        "measurement avatar capture plan did not explain side-pose depth value");
     Require(plan.Items.All(static item => item.NoRawMediaNeeded), "measurement avatar capture plan requested raw media for passive learning");
     Require(plan.EstimatedMeasurementBytes > 0L && plan.EstimatedMeasurementBytes < 10_000_000L, $"capture plan estimate looked wrong: {plan.EstimatedMeasurementBytes}");
 
@@ -2708,6 +4981,90 @@ static void RunMeasurementAvatarCapturePlanSmoke()
     Require(!json.Contains("FaceContour", StringComparison.Ordinal) && !json.Contains("LeftEyeContour", StringComparison.Ordinal), "measurement avatar capture plan leaked raw contour names");
     Require(!html.Contains("data:image", StringComparison.OrdinalIgnoreCase), "measurement avatar capture plan HTML embedded image data");
     Directory.Delete(planRoot, recursive: true);
+}
+
+static void RunMeasurementAvatarEasyModeAdvisorSmoke()
+{
+    var plan = new MeasurementAvatarCapturePlan
+    {
+        CanCollectMeasurements = true,
+        CollectionDecision = "next recommended capture: Head pose sweep",
+        Items =
+        [
+            new MeasurementAvatarCapturePlanItem
+            {
+                Id = "pose-sweep",
+                Priority = 1,
+                Category = "Pose",
+                Title = "Head pose sweep",
+                Instructions = "Slowly turn left/right through straight-on, three-quarter, and near-side views.",
+                WhyItMatters = "Side and three-quarter frames help reconstruct nose projection, cheek volume, and forehead depth.",
+                TargetMinutes = 8
+            }
+        ]
+    };
+    var strongQuality = new PersonalFaceCaptureQualityAssessment
+    {
+        Label = "strong",
+        ScorePercent = 92d,
+        CanCollectMeasurements = true,
+        StrongEnoughForAvatarLearning = true,
+        PrimaryReason = "capture quality is strong"
+    };
+
+    var unconfirmed = MeasurementAvatarEasyModeAdvisor.Create(new MeasurementAvatarEasyModeInput
+    {
+        CapturePlan = plan,
+        CaptureQuality = strongQuality
+    });
+    Require(!unconfirmed.CanStartLearning, "easy mode allowed learning without subject confirmation");
+    Require(unconfirmed.Title.Contains("Confirm", StringComparison.OrdinalIgnoreCase), "easy mode did not ask for subject confirmation first");
+
+    var ready = MeasurementAvatarEasyModeAdvisor.Create(new MeasurementAvatarEasyModeInput
+    {
+        SubjectConfirmed = true,
+        CameraActive = true,
+        FaceLocked = true,
+        AvatarLearningRequested = false,
+        CaptureQuality = strongQuality,
+        CapturePlan = plan
+    });
+    Require(ready.CanStartLearning, "easy mode was not start-ready with subject, camera, face lock, and quality");
+    Require(ready.ActionText.Contains("Start", StringComparison.OrdinalIgnoreCase), "easy mode did not expose a start action before learning is requested");
+    Require(ready.Detail.Contains("Head pose sweep", StringComparison.OrdinalIgnoreCase), "easy mode did not preview the next capture-plan target");
+
+    var running = MeasurementAvatarEasyModeAdvisor.Create(new MeasurementAvatarEasyModeInput
+    {
+        SubjectConfirmed = true,
+        CameraActive = true,
+        FaceLocked = true,
+        AvatarLearningRequested = true,
+        CaptureQuality = strongQuality,
+        CapturePlan = plan
+    });
+    Require(running.Severity == MeasurementAvatarEasyModeSeverity.Good, "easy mode did not mark active guided capture as good");
+    Require(running.Title.Contains("Head pose sweep", StringComparison.OrdinalIgnoreCase), "easy mode did not promote the capture-plan item while running");
+    Require(running.Detail.Contains("nose projection", StringComparison.OrdinalIgnoreCase), "easy mode omitted depth reconstruction reason from the running guidance");
+    Require(running.CapturePlanItemId == "pose-sweep", "easy mode did not preserve the active capture-plan item id");
+
+    var poorQuality = MeasurementAvatarEasyModeAdvisor.Create(new MeasurementAvatarEasyModeInput
+    {
+        SubjectConfirmed = true,
+        CameraActive = true,
+        FaceLocked = true,
+        AvatarLearningRequested = true,
+        CaptureQuality = new PersonalFaceCaptureQualityAssessment
+        {
+            Label = "weak",
+            ScorePercent = 34d,
+            CanCollectMeasurements = false,
+            PrimaryReason = "eye evidence is weak",
+            Suggestions = ["reduce glasses glare"]
+        },
+        CapturePlan = plan
+    });
+    Require(poorQuality.Title.Contains("Fix capture", StringComparison.OrdinalIgnoreCase), "easy mode did not stop for weak capture quality");
+    Require(poorQuality.Detail.Contains("reduce glasses glare", StringComparison.OrdinalIgnoreCase), "easy mode did not surface capture-quality correction");
 }
 
 static void RunTexturePreviewRoutingSmoke()
@@ -3060,13 +5417,15 @@ static FaceLandmarkFrame WithLandmarkConfidence(
         FaceContour = frame.FaceContour,
         LeftEyeContour = frame.LeftEyeContour,
         RightEyeContour = frame.RightEyeContour,
+        LeftBrowContour = frame.LeftBrowContour,
+        RightBrowContour = frame.RightBrowContour,
         OuterLipContour = frame.OuterLipContour,
         InnerLipContour = frame.InnerLipContour,
         JawContour = frame.JawContour
     };
 }
 
-static void WriteSyntheticVideo(string outputPath)
+static void WriteSyntheticVideo(string outputPath, bool includeEyeInset)
 {
     Directory.CreateDirectory(Path.GetDirectoryName(outputPath) ?? Environment.CurrentDirectory);
     var fourcc = VideoWriter.FourCC('M', 'J', 'P', 'G');
@@ -3082,7 +5441,7 @@ static void WriteSyntheticVideo(string outputPath)
 
     for (var index = 0; index < SyntheticVideoFrameCount; index++)
     {
-        using var frame = CreateSyntheticVideoFrame(index);
+        using var frame = CreateSyntheticVideoFrame(index, includeEyeInset);
         writer.Write(frame);
     }
 }
@@ -3098,6 +5457,7 @@ static void WriteSyntheticLandmarkStress(string outputPath)
     var cueAnalyzer = new FaceLandmarkCueAnalyzer();
     var trendAnalyzer = new FaceLandmarkTrendAnalyzer();
     var stabilityAnalyzer = new FaceLockStabilityAnalyzer();
+    var headPoseEstimator = new HeadPoseEstimator();
     var personalModelBuilder = new PersonalFaceModelBuilder();
     var captureQualityAnalyzer = new PersonalFaceCaptureQualityAnalyzer();
     var aggregate = new LandmarkEventAggregate();
@@ -3108,7 +5468,7 @@ static void WriteSyntheticLandmarkStress(string outputPath)
     for (var index = 0; index < frameCount; index++)
     {
         var progress = index / (double)(frameCount - 1);
-        var sleepiness = SmoothStep(progress);
+        var sleepiness = SmoothStep(Math.Clamp((progress - 0.12d) / 0.88d, 0d, 1d));
         var eyeRatio = 0.31d - sleepiness * 0.22d;
         var mouthRatio = 0.07d + sleepiness * 0.23d;
         var jawDroopRatio = sleepiness * 0.11d;
@@ -3138,10 +5498,12 @@ static void WriteSyntheticLandmarkStress(string outputPath)
             scale = Math.Min(scale, 0.82d);
         }
 
+        var yaw = Math.Sin(progress * Math.PI * 2.2d) * 18d;
+        var pitch = Math.Cos(progress * Math.PI * 1.8d) * 11d;
         var roll = Math.Sin(progress * Math.PI * 2.1d) * 13d;
         var capturedAt = start.AddSeconds(index / SyntheticVideoFramesPerSecond);
         var frame = OpenCvFacemarkLandmarkTracker.CreateLandmarkFrameFrom68Points(
-            CreateSyntheticFacemark68Points(eyeRatio, mouthRatio, center, scale, roll, jawDroopRatio),
+            CreateSyntheticFacemark68Points(eyeRatio, mouthRatio, center, scale, roll, jawDroopRatio, yaw, pitch),
             capturedAt,
             $"synthetic landmark stress {index}");
         frame = AddSyntheticLandmarkStressEvidence(frame, progress, sleepiness, index);
@@ -3166,7 +5528,17 @@ static void WriteSyntheticLandmarkStress(string outputPath)
             }
             : FaceFeatureDetection.None;
         var stability = stabilityAnalyzer.Update(stabilityDetection, reconstructed, metrics);
-        var personalModelUpdate = personalModelBuilder.Update(reconstructed, metrics, stability, cue, trend);
+        var headPose = headPoseEstimator.Estimate(new HeadPoseEstimatorInput
+        {
+            Frame = reconstructed,
+            FrameWidthPixels = SyntheticVideoWidth,
+            FrameHeightPixels = SyntheticVideoHeight,
+            Calibration = new HeadPoseCalibration
+            {
+                CameraHorizontalFovDegrees = 71.4d
+            }
+        });
+        var personalModelUpdate = personalModelBuilder.Update(reconstructed, metrics, stability, cue, trend, headPose);
         var captureQuality = captureQualityAnalyzer.Analyze(new PersonalFaceCaptureQualityInput
         {
             VideoWidth = SyntheticVideoWidth,
@@ -3388,6 +5760,63 @@ static void WriteSyntheticLandmarkStress(string outputPath)
         AvatarPackage = avatarPackage,
         CapturePlan = avatarCapturePlan,
         CurrentCaptureQuality = PersonalFaceCaptureQualityAssessment.Waiting,
+        CurrentHeadPose = new HeadPoseEstimate
+        {
+            HasFace = true,
+            XHorizontalPercent = 50.2d,
+            YVerticalPercent = 48.7d,
+            ApparentDistanceUnits = 3.82d,
+            FaceFillWidthPercent = 42.5d,
+            FaceFillHeightPercent = 61.0d,
+            RelativeDistanceScale = 0.94d,
+            InterEyeFrameWidthPercent = 16.4d,
+            YawDegrees = 8.5d,
+            PitchDegrees = -2.1d,
+            RollDegrees = 1.2d,
+            ConfidencePercent = 92d,
+            RotationSource = "facial transform matrix",
+            DistanceSource = "apparent face units from eye span and 71.4 deg horizontal FOV",
+            ReferenceScaleSource = "learned synthetic face scale",
+            ScaleCaveat = "Zoom changes effective FOV, so this is apparent camera-space distance until zoom/FOV is calibrated."
+        },
+        LastGoodFeatureStability = new LastGoodFeatureMeshStabilityReport
+        {
+            SampleCount = 4,
+            HeadLockedSampleCount = 4,
+            ComparedFeatureCount = 6,
+            HealthPercent = 91d,
+            WorstFeatureDriftPercent = 2.4d,
+            Status = "head-locked features are stable",
+            YawLeftSampleCount = 2,
+            YawRightSampleCount = 2,
+            YawRangeDegrees = 36d,
+            YawHealthPercent = 93d,
+            YawWorstFeatureDriftPercent = 2.1d,
+            YawStatus = "B head-turn lock is stable",
+            ANegativeSampleCount = 1,
+            APositiveSampleCount = 1,
+            ARangeDegrees = 18d,
+            AHealthPercent = 91d,
+            AWorstFeatureDriftPercent = 2.3d,
+            AStatus = "A-axis tilt lock is stable",
+            CNegativeSampleCount = 1,
+            CPositiveSampleCount = 1,
+            CRangeDegrees = 16d,
+            CHealthPercent = 90d,
+            CWorstFeatureDriftPercent = 2.4d,
+            CStatus = "C-axis tilt lock is stable",
+            ZCloseSampleCount = 1,
+            ZFarSampleCount = 1,
+            ZFaceScaleRangePercent = 22d,
+            ZHealthPercent = 89d,
+            ZWorstFeatureDriftPercent = 2.6d,
+            ZStatus = "Z distance lock is stable",
+            Findings = ["Head-locked feature centers stayed within the current drift tolerance across the retained samples."],
+            YawFindings = ["During recent left/right head turns, feature centers stayed attached in head-locked coordinates."],
+            AFindings = ["During recent A-axis tilts, feature centers stayed attached in head-locked coordinates."],
+            CFindings = ["During recent C-axis tilts, feature centers stayed attached in head-locked coordinates."],
+            ZFindings = ["During recent closer/farther samples, feature centers stayed attached after head-scale normalization."]
+        },
         FacePreviewHtmlPath = previewFiles.HtmlPath,
         LearningDataReportHtmlPath = corpusReadinessHtmlPath,
         CollectionAuditHtmlPath = collectionAuditHtmlPath,
@@ -3400,6 +5829,37 @@ static void WriteSyntheticLandmarkStress(string outputPath)
     Require(File.Exists(avatarDashboardHtmlPath), "synthetic stress did not write avatar system HTML");
     var dashboardHtml = File.ReadAllText(avatarDashboardHtmlPath);
     Require(dashboardHtml.Contains("Next sample influence", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted learning influence");
+    Require(dashboardHtml.Contains("Tracking sanity", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted tracking sanity status");
+    Require(dashboardHtml.Contains("Recent mesh stability", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted recent mesh stability status");
+    Require(dashboardHtml.Contains("B head-turn lock", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted B head-turn lock status");
+    Require(dashboardHtml.Contains("Z vs reference", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted Z reference scale metric");
+    Require(dashboardHtml.Contains("learned synthetic face scale", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted Z reference scale source");
+    Require(dashboardHtml.Contains("Recent dense mesh stability", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted recent dense mesh stability section");
+    Require(dashboardHtml.Contains("Worst feature drift", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted feature drift metric");
+    Require(dashboardHtml.Contains("B lock health", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted B lock health metric");
+    Require(dashboardHtml.Contains("B head-turn findings", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted B head-turn findings");
+    Require(dashboardHtml.Contains("A tilt lock", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted A tilt lock status");
+    Require(dashboardHtml.Contains("C tilt lock", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted C tilt lock status");
+    Require(dashboardHtml.Contains("Z distance lock", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted Z distance lock status");
+    Require(dashboardHtml.Contains("A tilt findings", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted A tilt findings");
+    Require(dashboardHtml.Contains("C tilt findings", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted C tilt findings");
+    Require(dashboardHtml.Contains("Z distance findings", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted Z distance findings");
+    Require(dashboardHtml.Contains("Current XYZABC pose", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted XYZABC pose section");
+    Require(dashboardHtml.Contains("X is horizontal", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted XYZABC definition");
+    Require(dashboardHtml.Contains("A rotate around X", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted A rotation metric");
+    Require(dashboardHtml.Contains("B rotate around Y", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted B rotation metric");
+    Require(dashboardHtml.Contains("C rotate around Z", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted C rotation metric");
+    Require(dashboardHtml.Contains("Tracking holds", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted tracking hold count");
+    Require(dashboardHtml.Contains("Pose audit", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted pose audit metric");
+    Require(dashboardHtml.Contains("Feature anchoring", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted feature anchoring metric");
+    Require(dashboardHtml.Contains("Identity session", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted identity-session metric");
+    Require(dashboardHtml.Contains("identity signature warming", StringComparison.OrdinalIgnoreCase)
+        || dashboardHtml.Contains("mature identity-session", StringComparison.OrdinalIgnoreCase)
+        || dashboardHtml.Contains("comparable identity", StringComparison.OrdinalIgnoreCase),
+        "synthetic stress avatar system dashboard omitted identity-session audit status");
+    Require(dashboardHtml.Contains("Pose consistency", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted pose consistency metric");
+    Require(dashboardHtml.Contains("Aperture consistency", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted aperture consistency metric");
+    Require(dashboardHtml.Contains("Pose estimation", StringComparison.OrdinalIgnoreCase), "synthetic stress avatar system dashboard omitted pose estimation score");
     var firstWindow = records.Take(12).ToList();
     var lastWindow = records.Skip(Math.Max(0, records.Count - 12)).ToList();
     var edgeWindow = records.Where(static record => record.NearFrameEdge).ToList();
@@ -3476,6 +5936,48 @@ static void WriteSyntheticLandmarkStress(string outputPath)
         PersonalFaceCorpusReadinessHtmlPath = corpusReadinessHtmlPath,
         PersonalFaceCorpusReadinessStatus = corpusReadiness.Status,
         PersonalFaceCorpusReadinessPercent = corpusReadiness.OverallReadinessPercent,
+        PersonalFaceCorpusContourShapeCoveragePercent = corpusReadiness.ContourShapeCoveragePercent,
+        PersonalFaceCorpusContourDepthProfileHealthPercent = corpusReadiness.ContourDepthProfileHealthPercent,
+        PersonalFaceCorpusSurfaceShapeCoveragePercent = corpusReadiness.SurfaceShapeCoveragePercent,
+        PersonalFaceCorpusSurfaceDepthProfileHealthPercent = corpusReadiness.SurfaceDepthProfileHealthPercent,
+        PersonalFaceCorpusZDistanceCoveragePercent = corpusReadiness.ZDistanceCoveragePercent,
+        PersonalFaceCorpusZDistanceEvidenceHealthPercent = corpusReadiness.ZDistanceEvidenceHealthPercent,
+        PersonalFaceCorpusZEstimateSamples = corpusReadiness.ZEstimateSamples,
+        PersonalFaceCorpusAverageZConfidencePercent = corpusReadiness.AverageZConfidencePercent,
+        PersonalFaceCorpusZApparentOnlyRate = corpusReadiness.ZApparentOnlyRate,
+        PersonalFaceCorpusARotationAroundXCoveragePercent = corpusReadiness.ARotationAroundXCoveragePercent,
+        PersonalFaceCorpusBRotationAroundYCoveragePercent = corpusReadiness.BRotationAroundYCoveragePercent,
+        PersonalFaceCorpusCRotationAroundZCoveragePercent = corpusReadiness.CRotationAroundZCoveragePercent,
+        PersonalFaceCorpusXYZABCCoveragePercent = corpusReadiness.XYZABCCoveragePercent,
+        PersonalFaceCorpusLeftBrowShapeSamples = corpusReadiness.LeftBrowShapeSamples,
+        PersonalFaceCorpusRightBrowShapeSamples = corpusReadiness.RightBrowShapeSamples,
+        PersonalFaceCorpusNoseBridgeShapeSamples = corpusReadiness.NoseBridgeShapeSamples,
+        PersonalFaceCorpusNoseBaseShapeSamples = corpusReadiness.NoseBaseShapeSamples,
+        PersonalFaceCorpusLeftCheekSurfaceSamples = corpusReadiness.LeftCheekSurfaceSamples,
+        PersonalFaceCorpusRightCheekSurfaceSamples = corpusReadiness.RightCheekSurfaceSamples,
+        PersonalFaceCorpusForeheadSurfaceSamples = corpusReadiness.ForeheadSurfaceSamples,
+        PersonalFaceCorpusDataAuditHealthPercent = corpusReadiness.DataAuditHealthPercent,
+        PersonalFaceCorpusPoseEstimationHealthPercent = corpusReadiness.PoseEstimationHealthPercent,
+        PersonalFaceCorpusFeatureAnchoringHealthPercent = corpusReadiness.FeatureAnchoringHealthPercent,
+        PersonalFaceCorpusIdentitySessionHealthPercent = corpusReadiness.IdentitySessionHealthPercent,
+        PersonalFaceCorpusIdentitySessionAuditStage = corpusReadiness.IdentitySessionAuditStage,
+        PersonalFaceCorpusIdentitySessionAuditStatus = corpusReadiness.IdentitySessionAuditStatus,
+        PersonalFaceCorpusRecentIdentityMeasurementSamples = corpusReadiness.RecentIdentityMeasurementSamples,
+        PersonalFaceCorpusAverageRecentIdentityConfidencePercent = corpusReadiness.AverageRecentIdentityConfidencePercent,
+        PersonalFaceCorpusRecentIdentityOutlierFrameRate = corpusReadiness.RecentIdentityOutlierFrameRate,
+        PersonalFaceCorpusPoseExplainedFeatureMotionHealthPercent = corpusReadiness.PoseExplainedFeatureMotionHealthPercent,
+        PersonalFaceCorpusPoseExplainedFeatureObservedRange = corpusReadiness.PoseExplainedFeatureObservedRange,
+        PersonalFaceCorpusPoseExplainedFeatureExpectedRange = corpusReadiness.PoseExplainedFeatureExpectedRange,
+        PersonalFaceCorpusEyeApertureReliabilityHealthPercent = corpusReadiness.EyeApertureReliabilityHealthPercent,
+        PersonalFaceCorpusPossibleOneEyeArtifactRate = corpusReadiness.PossibleOneEyeArtifactRate,
+        PersonalFaceCorpusEyeAgreementAveragePercent = corpusReadiness.EyeAgreementAveragePercent,
+        PersonalFaceCorpusEyeAgreementMinimumPercent = corpusReadiness.EyeAgreementMinimumPercent,
+        PersonalFaceCorpusMouthVerticalAnchorHealthPercent = corpusReadiness.MouthVerticalAnchorHealthPercent,
+        PersonalFaceCorpusMouthVerticalAnchorSamplesReviewed = corpusReadiness.MouthVerticalAnchorSamplesReviewed,
+        PersonalFaceCorpusMouthVerticalAnchorSuspiciousSampleRate = corpusReadiness.MouthVerticalAnchorSuspiciousSampleRate,
+        PersonalFaceCorpusJawDroopScaleHealthPercent = corpusReadiness.JawDroopScaleHealthPercent,
+        PersonalFaceCorpusMeasurementJournalCoveragePercent = corpusReadiness.MeasurementJournalCoveragePercent,
+        PersonalFaceCorpusDataAuditFindings = corpusReadiness.DataAuditFindings,
         PersonalFaceCorpusReadinessWarnings = corpusReadiness.Warnings,
         PersonalFaceCorpusReadinessNextCaptureSuggestions = corpusReadiness.NextCaptureSuggestions,
         MeasurementFacePreviewJsonPath = previewFiles.JsonPath,
@@ -3509,6 +6011,7 @@ static void WriteSyntheticLandmarkStress(string outputPath)
         PersonalModelRejectedSamples = personalModel.RejectedSamples,
         PersonalModelEventLikeRejectedSamples = personalModel.EventLikeRejectedSamples,
         PersonalModelLowQualityRejectedSamples = personalModel.LowQualityRejectedSamples,
+        PersonalModelTrackingArtifactRejectedSamples = personalModel.TrackingArtifactRejectedSamples,
         PersonalModelNoFaceRejectedSamples = personalModel.NoFaceRejectedSamples,
         PersonalModelAcceptedSampleWeight = personalModel.AcceptedSampleWeight,
         PersonalModelLearningAnchorPercent = personalModel.LearningStability.AnchorPercent,
@@ -3524,6 +6027,17 @@ static void WriteSyntheticLandmarkStress(string outputPath)
         PersonalModelFaceCenterXRange = RangeOptional(personalModel.FaceCenterX.Minimum, personalModel.FaceCenterX.Maximum),
         PersonalModelFaceCenterYRange = RangeOptional(personalModel.FaceCenterY.Minimum, personalModel.FaceCenterY.Maximum),
         PersonalModelFaceWidthRange = RangeOptional(personalModel.FaceWidth.Minimum, personalModel.FaceWidth.Maximum),
+        PersonalModelZEstimateSamples = personalModel.ZEstimateSamples,
+        PersonalModelZApparentDistanceRange = RangeOptional(personalModel.ZApparentDistanceUnits.Minimum, personalModel.ZApparentDistanceUnits.Maximum),
+        PersonalModelAverageZConfidencePercent = personalModel.ZConfidencePercent.Average,
+        PersonalModelSurfaceShapeCoveragePercent = corpusReadiness.SurfaceShapeCoveragePercent,
+        PersonalModelSurfaceDepthProfileHealthPercent = corpusReadiness.SurfaceDepthProfileHealthPercent,
+        PersonalModelContourDepthProfileHealthPercent = corpusReadiness.ContourDepthProfileHealthPercent,
+        PersonalModelZDistanceCoveragePercent = corpusReadiness.ZDistanceCoveragePercent,
+        PersonalModelARotationAroundXCoveragePercent = corpusReadiness.ARotationAroundXCoveragePercent,
+        PersonalModelBRotationAroundYCoveragePercent = corpusReadiness.BRotationAroundYCoveragePercent,
+        PersonalModelCRotationAroundZCoveragePercent = corpusReadiness.CRotationAroundZCoveragePercent,
+        PersonalModelXYZABCCoveragePercent = corpusReadiness.XYZABCCoveragePercent,
         Records = records
     };
 
@@ -3622,14 +6136,18 @@ static FaceLandmarkFrame AddSyntheticLandmarkStressEvidence(FaceLandmarkFrame fr
     };
 }
 
-static Mat CreateSyntheticVideoFrame(int index)
+static Mat CreateSyntheticVideoFrame(int index, bool includeEyeInset)
 {
     var progress = index / (double)(SyntheticVideoFrameCount - 1);
     var frame = new Mat(SyntheticVideoHeight, SyntheticVideoWidth, MatType.CV_8UC3, new Scalar(31, 35, 39));
     DrawSyntheticRoom(frame);
     DrawSyntheticDecoyFaces(frame, progress);
     DrawSyntheticMovingFace(frame, progress);
-    DrawSyntheticEyeInset(frame, progress);
+    if (includeEyeInset)
+    {
+        DrawSyntheticEyeInset(frame, progress);
+    }
+
     DrawSyntheticFrameLabel(frame, progress);
     return frame;
 }
@@ -3816,8 +6334,17 @@ static FaceLandmarkFrame CreateSyntheticLandmarkFrame(
     double mouthCenterY = 0.62d,
     double headYawDegrees = 0d,
     double headPitchDegrees = 0d,
-    double headRollDegrees = 0d)
+    double headRollDegrees = 0d,
+    bool leftEyeReconstructed = false,
+    bool rightEyeReconstructed = false,
+    bool mouthReconstructed = false,
+    bool eyeArtifactSuppressed = false,
+    double? leftEyeHalfWidth = null,
+    double? rightEyeHalfWidth = null,
+    double mouthCenterX = 0.50d)
 {
+    var leftEyeWidth = leftEyeHalfWidth ?? eyeHalfWidth;
+    var rightEyeWidth = rightEyeHalfWidth ?? eyeHalfWidth;
     return new FaceLandmarkFrame
     {
         HasFace = true,
@@ -3826,16 +6353,284 @@ static FaceLandmarkFrame CreateSyntheticLandmarkFrame(
         TrackingConfidence = 0.80d,
         EyeConfidence = eyeConfidence,
         MouthConfidence = mouthConfidence,
+        LeftEyeReconstructed = leftEyeReconstructed,
+        RightEyeReconstructed = rightEyeReconstructed,
+        MouthReconstructed = mouthReconstructed,
+        EyeArtifactSuppressed = eyeArtifactSuppressed,
         HeadYawDegrees = headYawDegrees,
         HeadPitchDegrees = headPitchDegrees,
         HeadRollDegrees = headRollDegrees,
         FaceContour = CreateNormalizedOval(0.50d, 0.48d, faceHalfWidth, faceHalfHeight),
-        LeftEyeContour = leftEyeRatio is double left ? CreateNormalizedOval(0.50d - eyeCenterOffset, eyeCenterY, eyeHalfWidth, eyeHalfWidth * left) : [],
-        RightEyeContour = rightEyeRatio is double right ? CreateNormalizedOval(0.50d + eyeCenterOffset, eyeCenterY, eyeHalfWidth, eyeHalfWidth * right) : [],
-        InnerLipContour = mouthRatio is double mouth ? CreateNormalizedOval(0.50d, mouthCenterY, mouthHalfWidth, mouthHalfWidth * mouth) : [],
+        LeftEyeContour = leftEyeRatio is double left ? CreateNormalizedOval(0.50d - eyeCenterOffset, eyeCenterY, leftEyeWidth, leftEyeWidth * left) : [],
+        RightEyeContour = rightEyeRatio is double right ? CreateNormalizedOval(0.50d + eyeCenterOffset, eyeCenterY, rightEyeWidth, rightEyeWidth * right) : [],
+        LeftBrowContour = CreateSyntheticBrow(0.50d - eyeCenterOffset, eyeCenterY - eyeHalfWidth * 0.90d, leftEyeWidth),
+        RightBrowContour = CreateSyntheticBrow(0.50d + eyeCenterOffset, eyeCenterY - eyeHalfWidth * 0.90d, rightEyeWidth),
+        InnerLipContour = mouthRatio is double mouth ? CreateNormalizedOval(mouthCenterX, mouthCenterY, mouthHalfWidth, mouthHalfWidth * mouth) : [],
         JawContour = [new(0.50d - faceHalfWidth * 0.64d, mouthCenterY), new(0.50d - faceHalfWidth * 0.32d, 0.74d), new(0.50d, 0.79d), new(0.50d + faceHalfWidth * 0.32d, 0.74d), new(0.50d + faceHalfWidth * 0.64d, mouthCenterY)],
         BlendshapeScores = CreateBlendshapeScores(eyeBlinkLeftScore, eyeBlinkRightScore, jawOpenScore, mouthCloseScore)
     };
+}
+
+static FaceLandmarkFrame CreateSyntheticDenseMeshFrame(
+    double scale = 1d,
+    double matrixYawDegrees = 0d,
+    double matrixPitchDegrees = 0d,
+    double matrixRollDegrees = 0d,
+    DateTime? capturedAtUtc = null)
+{
+    int[] faceOval =
+    [
+        10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+        397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+        172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109
+    ];
+    int[] eyeA =
+    [
+        33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7
+    ];
+    int[] eyeB =
+    [
+        362, 398, 384, 385, 386, 387, 388, 466, 263, 249, 390, 373, 374, 380, 381, 382
+    ];
+    int[] browA =
+    [
+        70, 63, 105, 66, 107, 55, 65, 52, 53, 46
+    ];
+    int[] browB =
+    [
+        336, 296, 334, 293, 300, 285, 295, 282, 283, 276
+    ];
+    int[] outerLip =
+    [
+        61, 185, 40, 39, 37, 0, 267, 269, 270, 409,
+        291, 375, 321, 405, 314, 17, 84, 181, 91, 146
+    ];
+    int[] innerLip =
+    [
+        78, 191, 80, 81, 82, 13, 312, 311, 310, 415,
+        308, 324, 318, 402, 317, 14, 87, 178, 88, 95
+    ];
+    int[] jaw =
+    [
+        234, 93, 132, 58, 172, 136, 150, 149, 176, 148, 152,
+        377, 400, 378, 379, 365, 397, 288, 361, 323, 454
+    ];
+
+    var points = new SyntheticMeshPoint[468];
+    for (var index = 0; index < points.Length; index++)
+    {
+        var angle = index / (double)points.Length * Math.PI * 2d;
+        points[index] = new SyntheticMeshPoint(
+            0.50d + Math.Cos(angle) * 0.15d,
+            0.50d + Math.Sin(angle) * 0.23d,
+            Math.Sin(angle) * 0.025d);
+    }
+
+    SetOval(points, faceOval, 0.50d, 0.50d, 0.22d * scale, 0.32d * scale, zScale: 0.030d * scale);
+    SetOval(points, eyeA, 0.50d - 0.08d * scale, 0.50d - 0.10d * scale, 0.055d * scale, 0.014d * scale, zScale: 0.040d * scale);
+    SetOval(points, eyeB, 0.50d + 0.08d * scale, 0.50d - 0.10d * scale, 0.055d * scale, 0.014d * scale, zScale: 0.040d * scale);
+    SetOval(points, outerLip, 0.50d, 0.50d + 0.125d * scale, 0.095d * scale, 0.030d * scale, zScale: 0.055d * scale);
+    SetOval(points, innerLip, 0.50d, 0.50d + 0.125d * scale, 0.065d * scale, 0.012d * scale, zScale: 0.060d * scale);
+    SetPolyline(points, jaw, ScaleAnchors([new(0.31d, 0.57d), new(0.36d, 0.72d), new(0.50d, 0.81d), new(0.64d, 0.72d), new(0.69d, 0.57d)], scale), z: 0.015d * scale);
+    SetPolyline(points, [168, 6, 197, 195, 5, 4, 1, 19, 94, 2], ScaleAnchors([new(0.50d, 0.42d), new(0.50d, 0.55d), new(0.50d, 0.59d)], scale), z: 0.080d * scale);
+    SetPolyline(points, [98, 97, 2, 326, 327], ScaleAnchors([new(0.43d, 0.60d), new(0.50d, 0.62d), new(0.57d, 0.60d)], scale), z: 0.060d * scale);
+    SetPolyline(points, browA, ScaleAnchors([new(0.35d, 0.33d), new(0.45d, 0.32d)], scale), z: 0.035d * scale);
+    SetPolyline(points, browB, ScaleAnchors([new(0.55d, 0.32d), new(0.65d, 0.33d)], scale), z: 0.035d * scale);
+    SetPolyline(points, [234, 93, 132, 58, 172, 136], ScaleAnchors([new(0.31d, 0.46d), new(0.36d, 0.57d)], scale), z: 0.010d * scale);
+    SetPolyline(points, [454, 323, 361, 288, 397, 365], ScaleAnchors([new(0.69d, 0.46d), new(0.64d, 0.57d)], scale), z: 0.010d * scale);
+
+    var densePoints = points
+        .Select((point, index) => new FaceMeshLandmarkPoint
+        {
+            Index = index,
+            X = point.X,
+            Y = point.Y,
+            Z = point.Z
+        })
+        .ToList();
+
+    return new FaceLandmarkFrame
+    {
+        HasFace = true,
+        Source = "synthetic MediaPipe dense mesh",
+        CapturedAtUtc = capturedAtUtc ?? DateTime.UtcNow,
+        TrackingConfidence = 0.94d,
+        EyeConfidence = 0.92d,
+        MouthConfidence = 0.91d,
+        HeadYawDegrees = matrixYawDegrees,
+        HeadPitchDegrees = matrixPitchDegrees,
+        HeadRollDegrees = matrixRollDegrees,
+        DenseMeshTopology = "MediaPipeFaceMesh468",
+        DenseMeshPoints = densePoints,
+        FacialTransformationMatrix = CreateSyntheticFacialTransformMatrix(matrixYawDegrees, matrixPitchDegrees, matrixRollDegrees),
+        FaceContour = SelectMeshPoints(densePoints, faceOval),
+        LeftEyeContour = SelectMeshPoints(densePoints, eyeA),
+        RightEyeContour = SelectMeshPoints(densePoints, eyeB),
+        LeftBrowContour = SelectMeshPoints(densePoints, browA),
+        RightBrowContour = SelectMeshPoints(densePoints, browB),
+        OuterLipContour = SelectMeshPoints(densePoints, outerLip),
+        InnerLipContour = SelectMeshPoints(densePoints, innerLip),
+        JawContour = SelectMeshPoints(densePoints, jaw),
+        BlendshapeScores = CreateBlendshapeScores(0.10d, 0.11d, 0.08d, 0.86d)
+    };
+}
+
+static FaceLandmarkFrame CreateSyntheticDenseYawEvidenceFrame()
+{
+    var baseFrame = CreateSyntheticDenseMeshFrame(matrixYawDegrees: 0d, matrixPitchDegrees: 0d, matrixRollDegrees: 0d);
+    var densePoints = baseFrame.DenseMeshPoints
+        .Select(static point =>
+        {
+            var x = point.Index == 1 ? point.X + 0.075d : point.X;
+            var z = point.Index switch
+            {
+                234 => point.Z - 0.050d,
+                454 => point.Z + 0.050d,
+                _ => point.Z
+            };
+            return new FaceMeshLandmarkPoint
+            {
+                Index = point.Index,
+                X = x,
+                Y = point.Y,
+                Z = z
+            };
+        })
+        .ToList();
+
+    return new FaceLandmarkFrame
+    {
+        HasFace = true,
+        Source = "synthetic MediaPipe dense mesh with flat transform and yaw geometry",
+        CapturedAtUtc = baseFrame.CapturedAtUtc,
+        TrackingConfidence = baseFrame.TrackingConfidence,
+        EyeConfidence = baseFrame.EyeConfidence,
+        MouthConfidence = baseFrame.MouthConfidence,
+        HeadYawDegrees = 0d,
+        HeadPitchDegrees = 0d,
+        HeadRollDegrees = 0d,
+        DenseMeshTopology = baseFrame.DenseMeshTopology,
+        DenseMeshPoints = densePoints,
+        FacialTransformationMatrix = CreateSyntheticFacialTransformMatrix(0d, 0d, 0d),
+        FaceContour = baseFrame.FaceContour,
+        LeftEyeContour = baseFrame.LeftEyeContour,
+        RightEyeContour = baseFrame.RightEyeContour,
+        LeftBrowContour = baseFrame.LeftBrowContour,
+        RightBrowContour = baseFrame.RightBrowContour,
+        OuterLipContour = baseFrame.OuterLipContour,
+        InnerLipContour = baseFrame.InnerLipContour,
+        JawContour = baseFrame.JawContour,
+        BlendshapeScores = baseFrame.BlendshapeScores
+    };
+}
+
+static IReadOnlyList<WpfPoint> SelectMeshPoints(IReadOnlyList<FaceMeshLandmarkPoint> points, IReadOnlyList<int> indices)
+{
+    var lookup = points.ToDictionary(static point => point.Index);
+    return indices
+        .Where(lookup.ContainsKey)
+        .Select(index => new WpfPoint(lookup[index].X, lookup[index].Y))
+        .ToList();
+}
+
+static IReadOnlyList<WpfPoint> ScaleAnchors(IReadOnlyList<WpfPoint> anchors, double scale)
+{
+    return anchors
+        .Select(point => new WpfPoint(
+            0.50d + (point.X - 0.50d) * scale,
+            0.50d + (point.Y - 0.50d) * scale))
+        .ToList();
+}
+
+static IReadOnlyList<double> CreateSyntheticFacialTransformMatrix(
+    double yawDegrees,
+    double pitchDegrees,
+    double rollDegrees)
+{
+    var yaw = yawDegrees * Math.PI / 180d;
+    var pitch = pitchDegrees * Math.PI / 180d;
+    var roll = rollDegrees * Math.PI / 180d;
+
+    var sinYaw = Math.Sin(yaw);
+    var cosYaw = Math.Cos(yaw);
+    var sinPitch = Math.Sin(pitch);
+    var cosPitch = Math.Cos(pitch);
+    var sinRoll = Math.Sin(roll);
+    var cosRoll = Math.Cos(roll);
+
+    var yawMatrix = new[,]
+    {
+        { cosYaw, 0d, sinYaw },
+        { 0d, 1d, 0d },
+        { -sinYaw, 0d, cosYaw }
+    };
+    var pitchMatrix = new[,]
+    {
+        { 1d, 0d, 0d },
+        { 0d, cosPitch, -sinPitch },
+        { 0d, sinPitch, cosPitch }
+    };
+    var rollMatrix = new[,]
+    {
+        { cosRoll, -sinRoll, 0d },
+        { sinRoll, cosRoll, 0d },
+        { 0d, 0d, 1d }
+    };
+
+    var rotation = MultiplyMatrix(MultiplyMatrix(rollMatrix, pitchMatrix), yawMatrix);
+    return
+    [
+        rotation[0, 0], rotation[0, 1], rotation[0, 2], 0d,
+        rotation[1, 0], rotation[1, 1], rotation[1, 2], 0d,
+        rotation[2, 0], rotation[2, 1], rotation[2, 2], 0d,
+        0d, 0d, 0d, 1d
+    ];
+}
+
+static double[,] MultiplyMatrix(double[,] left, double[,] right)
+{
+    var result = new double[3, 3];
+    for (var row = 0; row < 3; row++)
+    {
+        for (var column = 0; column < 3; column++)
+        {
+            result[row, column] =
+                left[row, 0] * right[0, column]
+                + left[row, 1] * right[1, column]
+                + left[row, 2] * right[2, column];
+        }
+    }
+
+    return result;
+}
+
+static void SetOval(SyntheticMeshPoint[] points, IReadOnlyList<int> indices, double centerX, double centerY, double halfWidth, double halfHeight, double zScale)
+{
+    for (var offset = 0; offset < indices.Count; offset++)
+    {
+        var angle = offset / (double)indices.Count * Math.PI * 2d;
+        points[indices[offset]] = new SyntheticMeshPoint(
+            centerX + Math.Cos(angle) * halfWidth,
+            centerY + Math.Sin(angle) * halfHeight,
+            Math.Cos(angle) * zScale);
+    }
+}
+
+static void SetPolyline(SyntheticMeshPoint[] points, IReadOnlyList<int> indices, IReadOnlyList<WpfPoint> anchors, double z)
+{
+    for (var offset = 0; offset < indices.Count; offset++)
+    {
+        var t = indices.Count == 1 ? 0d : offset / (double)(indices.Count - 1);
+        var scaled = t * (anchors.Count - 1);
+        var anchorIndex = Math.Min(anchors.Count - 2, Math.Max(0, (int)Math.Floor(scaled)));
+        var local = scaled - anchorIndex;
+        var first = anchors[anchorIndex];
+        var second = anchors[anchorIndex + 1];
+        points[indices[offset]] = new SyntheticMeshPoint(
+            first.X + (second.X - first.X) * local,
+            first.Y + (second.Y - first.Y) * local,
+            z);
+    }
 }
 
 static IReadOnlyDictionary<string, double> CreateBlendshapeScores(
@@ -3874,7 +6669,9 @@ static IReadOnlyList<WpfPoint> CreateSyntheticFacemark68Points(
     WpfPoint? center = null,
     double scale = 1d,
     double rollDegrees = 0d,
-    double jawDroopRatio = 0d)
+    double jawDroopRatio = 0d,
+    double yawDegrees = 0d,
+    double pitchDegrees = 0d)
 {
     var points = Enumerable.Repeat(new WpfPoint(0.50d, 0.50d), 68).ToArray();
     for (var i = 0; i < 17; i++)
@@ -3894,7 +6691,34 @@ static IReadOnlyList<WpfPoint> CreateSyntheticFacemark68Points(
     FillClosedOval(points, 42, 6, 0.60d, 0.42d, 0.050d, 0.050d * eyeRatio);
     FillClosedOval(points, 48, 12, 0.50d, 0.63d, 0.110d, 0.050d + 0.050d * mouthRatio);
     FillClosedOval(points, 60, 8, 0.50d, 0.63d, 0.075d, 0.075d * mouthRatio);
+    ApplySyntheticHeadPose(points, yawDegrees, pitchDegrees);
     return TransformFacePoints(points, center ?? new WpfPoint(0.50d, 0.50d), scale, rollDegrees);
+}
+
+static void ApplySyntheticHeadPose(WpfPoint[] points, double yawDegrees, double pitchDegrees)
+{
+    var yawOffset = Math.Clamp(yawDegrees, -28d, 28d) / 34d * 0.20d;
+    var pitchOffset = Math.Clamp(pitchDegrees, -24d, 24d) / 50d * 0.21d;
+
+    for (var index = 27; index <= 35; index++)
+    {
+        var noseWeight = index <= 30
+            ? (index - 27) / 3d
+            : Math.Max(0.35d, 1d - (index - 30) / 5d);
+        points[index] = OffsetPoint(points[index], yawOffset * noseWeight, pitchOffset * noseWeight);
+    }
+
+    for (var index = 31; index <= 35; index++)
+    {
+        points[index] = OffsetPoint(points[index], yawOffset * 0.18d, pitchOffset * 0.18d);
+    }
+}
+
+static WpfPoint OffsetPoint(WpfPoint point, double x, double y)
+{
+    return new WpfPoint(
+        Math.Clamp(point.X + x, 0d, 1d),
+        Math.Clamp(point.Y + y, 0d, 1d));
 }
 
 static void FillLine(WpfPoint[] points, int start, int count, WpfPoint first, WpfPoint last)
@@ -3950,6 +6774,18 @@ static IReadOnlyList<WpfPoint> CreateNormalizedOval(double centerX, double cente
         new(centerX + halfWidth * 0.72d, centerY + halfHeight * 0.70d),
         new(centerX, centerY + halfHeight),
         new(centerX - halfWidth * 0.72d, centerY + halfHeight * 0.70d)
+    ];
+}
+
+static IReadOnlyList<WpfPoint> CreateSyntheticBrow(double centerX, double centerY, double halfWidth)
+{
+    return
+    [
+        new(centerX - halfWidth * 0.95d, centerY + halfWidth * 0.08d),
+        new(centerX - halfWidth * 0.45d, centerY - halfWidth * 0.03d),
+        new(centerX, centerY - halfWidth * 0.08d),
+        new(centerX + halfWidth * 0.45d, centerY - halfWidth * 0.03d),
+        new(centerX + halfWidth * 0.95d, centerY + halfWidth * 0.08d)
     ];
 }
 
@@ -4090,14 +6926,28 @@ static PersonalFaceContourShapeProfile ShapeProfile(
         var y = closed
             ? centerY + Math.Sin(angle) * halfHeight
             : centerY + Math.Sin(t * Math.PI) * halfHeight;
+        var depth = featureId.Contains("jaw", StringComparison.OrdinalIgnoreCase)
+            ? 0.075d
+            : featureId.Contains("lip", StringComparison.OrdinalIgnoreCase) ? 0.055d : 0.025d;
+        var depthSwing = featureId.Contains("jaw", StringComparison.OrdinalIgnoreCase)
+            ? 0.85d
+            : featureId.Contains("lip", StringComparison.OrdinalIgnoreCase) ? 0.45d : 0.35d;
+        var z = closed
+            ? depth + Math.Sin(angle) * depth * depthSwing
+            : depth + Math.Sin(t * Math.PI) * depth * depthSwing;
         points.Add(new PersonalFaceContourShapePointProfile
         {
             Index = index,
             X = Distribution(x, sampleCount, totalWeight, spread: 0.004d),
-            Y = Distribution(y, sampleCount, totalWeight, spread: 0.004d)
+            Y = Distribution(y, sampleCount, totalWeight, spread: 0.004d),
+            Z = Distribution(z, sampleCount, totalWeight, spread: 0.003d)
         });
     }
 
+    var zValues = points
+        .Select(static point => point.Z.Average)
+        .OfType<double>()
+        .ToList();
     return new PersonalFaceContourShapeProfile
     {
         FeatureId = featureId,
@@ -4106,8 +6956,45 @@ static PersonalFaceContourShapeProfile ShapeProfile(
         PointCount = pointCount,
         SampleCount = sampleCount,
         TotalWeight = totalWeight,
+        DepthPointCount = pointCount,
+        PointCoveragePercent = 100d,
+        DepthPointCoveragePercent = 100d,
+        DepthEvidencePercent = 88d,
+        DepthStabilityPercent = 82d,
+        DepthRange = zValues.Count > 0 ? zValues.Max() - zValues.Min() : null,
+        AverageDepthStandardDeviation = 0.003d,
         Points = points
     };
+}
+
+static PersonalFaceContourShapeProfile SurfaceProfile(
+    string featureId,
+    string label,
+    int pointCount,
+    int sampleCount = 96,
+    double totalWeight = 82d,
+    double depth = 0.03d)
+{
+    var profile = ShapeProfile(featureId, label, pointCount, closed: false, sampleCount: sampleCount, totalWeight: totalWeight);
+    for (var index = 0; index < profile.Points.Count; index++)
+    {
+        var t = profile.Points.Count <= 1 ? 0d : index / (double)(profile.Points.Count - 1);
+        profile.Points[index].Z = Distribution(depth + Math.Sin(t * Math.PI) * depth * 0.18d, sampleCount, totalWeight, spread: 0.003d);
+    }
+
+    var zValues = profile.Points
+        .Select(static point => point.Z.Average)
+        .OfType<double>()
+        .ToList();
+    profile.DepthPointCount = profile.PointCount;
+    profile.PointCoveragePercent = 100d;
+    profile.DepthPointCoveragePercent = 100d;
+    profile.DepthEvidencePercent = 92d;
+    profile.DepthStabilityPercent = 86d;
+    profile.DepthRange = zValues.Count > 0 ? zValues.Max() - zValues.Min() : null;
+    profile.AverageDepthStandardDeviation = 0.003d;
+
+    return profile;
 }
 
 static PersonalFaceContourShapeProfile ShiftShapeProfile(
@@ -4556,6 +7443,12 @@ internal sealed class MeasurementFacePreviewSceneContract
 
     public List<MeasurementFacePreviewPolyline> Polylines { get; set; } = [];
 
+    public List<MeasurementFacePreviewSurfacePatch> SurfacePatches { get; set; } = [];
+
+    public List<MeasurementFacePreviewPoseBucket> PoseBuckets { get; set; } = [];
+
+    public List<MeasurementFacePreviewSurfaceEvidence> SurfaceEvidence { get; set; } = [];
+
     public double MeasurementContributionPercent { get; set; }
 
     public double TemplatePriorContributionPercent { get; set; }
@@ -4564,3 +7457,5 @@ internal sealed class MeasurementFacePreviewSceneContract
 }
 
 internal sealed record MeasurementPreviewProjectedPoint(double X, double Y, double Z);
+
+internal readonly record struct SyntheticMeshPoint(double X, double Y, double Z);

@@ -33,6 +33,9 @@ internal sealed class MediaPipeSidecarResponse
 
     [JsonPropertyName("blendshapes")]
     public IReadOnlyList<MediaPipeSidecarBlendshape> Blendshapes { get; init; } = [];
+
+    [JsonPropertyName("facialTransformationMatrix")]
+    public IReadOnlyList<double> FacialTransformationMatrix { get; init; } = [];
 }
 
 internal sealed class MediaPipeSidecarLandmark

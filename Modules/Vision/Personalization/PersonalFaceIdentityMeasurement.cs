@@ -11,6 +11,12 @@ public sealed class PersonalFaceIdentityMeasurement
 
     public double? FaceAspectRatio { get; set; }
 
+    public double? EyeMidlineXToFaceWidth { get; set; }
+
+    public double? MouthCenterXToFaceWidth { get; set; }
+
+    public double? EyeToMouthXOffsetToFaceWidth { get; set; }
+
     public double? InterEyeDistanceToFaceWidth { get; set; }
 
     public double? LeftEyeWidthToFaceWidth { get; set; }
@@ -51,7 +57,9 @@ public sealed class PersonalFaceIdentityMeasurement
         {
             var leftCenter = Center(leftEye);
             var rightCenter = Center(rightEye);
+            var eyeCenterX = (leftCenter.X + rightCenter.X) / 2d;
             var eyeCenterY = (leftCenter.Y + rightCenter.Y) / 2d;
+            measurement.EyeMidlineXToFaceWidth = SafeRatio(eyeCenterX - face.Left, face.Width);
             measurement.InterEyeDistanceToFaceWidth = SafeRatio(Math.Abs(rightCenter.X - leftCenter.X), face.Width);
             measurement.LeftEyeWidthToFaceWidth = SafeRatio(leftEye.Width, face.Width);
             measurement.RightEyeWidthToFaceWidth = SafeRatio(rightEye.Width, face.Width);
@@ -59,6 +67,8 @@ public sealed class PersonalFaceIdentityMeasurement
             if (!mouth.IsEmpty)
             {
                 var mouthCenter = Center(mouth);
+                measurement.MouthCenterXToFaceWidth = SafeRatio(mouthCenter.X - face.Left, face.Width);
+                measurement.EyeToMouthXOffsetToFaceWidth = SafeRatio(Math.Abs(mouthCenter.X - eyeCenterX), face.Width);
                 measurement.MouthCenterYToFaceHeight = SafeRatio(mouthCenter.Y - face.Top, face.Height);
                 measurement.EyeToMouthYDistanceToFaceHeight = SafeRatio(mouthCenter.Y - eyeCenterY, face.Height);
             }
@@ -76,6 +86,9 @@ public sealed class PersonalFaceIdentityMeasurement
     public IEnumerable<(string Name, double? Value)> NamedValues()
     {
         yield return ("Face aspect", FaceAspectRatio);
+        yield return ("Eye horizontal position", EyeMidlineXToFaceWidth);
+        yield return ("Mouth horizontal position", MouthCenterXToFaceWidth);
+        yield return ("Eye-to-mouth horizontal offset", EyeToMouthXOffsetToFaceWidth);
         yield return ("Eye spacing / face width", InterEyeDistanceToFaceWidth);
         yield return ("Left eye width / face width", LeftEyeWidthToFaceWidth);
         yield return ("Right eye width / face width", RightEyeWidthToFaceWidth);
@@ -88,6 +101,9 @@ public sealed class PersonalFaceIdentityMeasurement
     private IEnumerable<double?> Values()
     {
         yield return FaceAspectRatio;
+        yield return EyeMidlineXToFaceWidth;
+        yield return MouthCenterXToFaceWidth;
+        yield return EyeToMouthXOffsetToFaceWidth;
         yield return InterEyeDistanceToFaceWidth;
         yield return LeftEyeWidthToFaceWidth;
         yield return RightEyeWidthToFaceWidth;

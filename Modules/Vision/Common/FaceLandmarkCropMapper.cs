@@ -99,9 +99,14 @@ public static class FaceLandmarkCropMapper
             HeadPitchDegrees = frame.HeadPitchDegrees,
             HeadRollDegrees = frame.HeadRollDegrees,
             BlendshapeScores = frame.BlendshapeScores,
+            DenseMeshTopology = frame.DenseMeshTopology,
+            DenseMeshPoints = MapDensePoints(frame.DenseMeshPoints, crop),
+            FacialTransformationMatrix = frame.FacialTransformationMatrix,
             FaceContour = MapPoints(frame.FaceContour, crop),
             LeftEyeContour = MapPoints(frame.LeftEyeContour, crop),
             RightEyeContour = MapPoints(frame.RightEyeContour, crop),
+            LeftBrowContour = MapPoints(frame.LeftBrowContour, crop),
+            RightBrowContour = MapPoints(frame.RightBrowContour, crop),
             OuterLipContour = MapPoints(frame.OuterLipContour, crop),
             InnerLipContour = MapPoints(frame.InnerLipContour, crop),
             JawContour = MapPoints(frame.JawContour, crop)
@@ -131,6 +136,24 @@ public static class FaceLandmarkCropMapper
 
         return points
             .Select(point => new Point(MapX(point.X, crop), MapY(point.Y, crop)))
+            .ToList();
+    }
+
+    private static IReadOnlyList<FaceMeshLandmarkPoint> MapDensePoints(IReadOnlyList<FaceMeshLandmarkPoint> points, Rect crop)
+    {
+        if (points.Count == 0)
+        {
+            return [];
+        }
+
+        return points
+            .Select(point => new FaceMeshLandmarkPoint
+            {
+                Index = point.Index,
+                X = MapX(point.X, crop),
+                Y = MapY(point.Y, crop),
+                Z = point.Z
+            })
             .ToList();
     }
 

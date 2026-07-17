@@ -54,11 +54,21 @@ public sealed class FaceLandmarkFrame
 
     public IReadOnlyDictionary<string, double> BlendshapeScores { get; init; } = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
+    public string DenseMeshTopology { get; init; } = "";
+
+    public IReadOnlyList<FaceMeshLandmarkPoint> DenseMeshPoints { get; init; } = [];
+
+    public IReadOnlyList<double> FacialTransformationMatrix { get; init; } = [];
+
     public IReadOnlyList<Point> FaceContour { get; init; } = [];
 
     public IReadOnlyList<Point> LeftEyeContour { get; init; } = [];
 
     public IReadOnlyList<Point> RightEyeContour { get; init; } = [];
+
+    public IReadOnlyList<Point> LeftBrowContour { get; init; } = [];
+
+    public IReadOnlyList<Point> RightBrowContour { get; init; } = [];
 
     public IReadOnlyList<Point> OuterLipContour { get; init; } = [];
 
@@ -68,7 +78,11 @@ public sealed class FaceLandmarkFrame
 
     public bool HasEyeContours => LeftEyeContour.Count >= 4 && RightEyeContour.Count >= 4;
 
+    public bool HasBrowContours => LeftBrowContour.Count >= 3 && RightBrowContour.Count >= 3;
+
     public bool HasMouthContours => InnerLipContour.Count >= 4 || OuterLipContour.Count >= 4;
+
+    public bool HasDenseMesh => DenseMeshPoints.Count >= 100;
 
     public string ConfidenceLabel
     {

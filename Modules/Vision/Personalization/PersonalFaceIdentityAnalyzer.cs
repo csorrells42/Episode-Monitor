@@ -8,7 +8,7 @@ public static class PersonalFaceIdentityAnalyzer
 
     private const int MinimumComparableFeatures = 5;
     private const int MinimumWarmupStrongMismatchComparableFeatures = 7;
-    private const double MinimumWarmupStrongMismatchConfidencePercent = 12d;
+    private const double MinimumWarmupStrongMismatchConfidencePercent = 24d;
     private const int MinimumWarmupStrongMismatchOutlierFeatures = 6;
     private const double MinimumAutoGateConfidencePercent = 28d;
     private const int MinimumAutoGateOutlierFeatures = 4;
@@ -36,6 +36,9 @@ public static class PersonalFaceIdentityAnalyzer
         };
 
         AddFeature(analysis, "Face aspect", measurement.FaceAspectRatio, model.FaceAspectRatio, 0.16d);
+        AddFeature(analysis, "Eye horizontal position", measurement.EyeMidlineXToFaceWidth, model.EyeMidlineXToFaceWidth, 0.075d);
+        AddFeature(analysis, "Mouth horizontal position", measurement.MouthCenterXToFaceWidth, model.MouthCenterXToFaceWidth, 0.085d);
+        AddFeature(analysis, "Eye-to-mouth horizontal offset", measurement.EyeToMouthXOffsetToFaceWidth, model.EyeToMouthXOffsetToFaceWidth, 0.055d);
         AddFeature(analysis, "Eye spacing / face width", measurement.InterEyeDistanceToFaceWidth, model.InterEyeDistanceToFaceWidth, 0.055d);
         AddFeature(analysis, "Left eye width / face width", measurement.LeftEyeWidthToFaceWidth, model.LeftEyeWidthToFaceWidth, 0.035d);
         AddFeature(analysis, "Right eye width / face width", measurement.RightEyeWidthToFaceWidth, model.RightEyeWidthToFaceWidth, 0.035d);
@@ -46,9 +49,7 @@ public static class PersonalFaceIdentityAnalyzer
 
         analysis.ComparedFeatureCount = analysis.FeatureScores.Count;
         analysis.OutlierFeatureCount = analysis.FeatureScores.Count(static score => score.IsOutlier);
-        analysis.ConfidencePercent = analysis.ComparedFeatureCount <= 0
-            ? 0d
-            : Math.Round(analysis.FeatureScores.Average(static score => score.ConfidencePercent), 6, MidpointRounding.AwayFromZero);
+        analysis.ConfidencePercent = CalculateConfidencePercent(analysis.FeatureScores);
 
         if (model.AcceptedSamples < MinimumSamplesForReport || analysis.ComparedFeatureCount < MinimumComparableFeatures)
         {
@@ -116,5 +117,18 @@ public static class PersonalFaceIdentityAnalyzer
             ConfidencePercent = Math.Round(confidence, 6, MidpointRounding.AwayFromZero),
             IsOutlier = isOutlier
         });
+    }
+
+    private static double CalculateConfidencePercent(IReadOnlyCollection<PersonalFaceIdentityFeatureScore> scores)
+    {
+        if (scores.Count == 0)
+        {
+            return 0d;
+        }
+
+        var average = scores.Average(static score => score.ConfidencePercent);
+        var outlierRate = scores.Count(static score => score.IsOutlier) / (double)scores.Count;
+        var outlierLimited = Math.Clamp(100d - outlierRate * 150d, 0d, 100d);
+        return Math.Round(Math.Min(average, outlierLimited), 6, MidpointRounding.AwayFromZero);
     }
 }

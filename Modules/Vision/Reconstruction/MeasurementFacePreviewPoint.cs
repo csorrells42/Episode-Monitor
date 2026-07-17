@@ -12,6 +12,8 @@ public sealed class MeasurementFacePreviewPoint
 
     public double ConfidencePercent { get; set; }
 
+    // A preview point owns X/Y/Z. A/B/C orientation is supplied by the preview
+    // model metrics, pose bucket, or future local surface patch.
     public double X { get; set; }
 
     public double Y { get; set; }

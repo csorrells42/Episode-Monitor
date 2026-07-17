@@ -39,15 +39,22 @@ public sealed class MeasurementAvatarCapturePlanBuilder
             readiness.PoseCoveragePercent,
             readiness.PoseBucketCoveragePercent,
             readiness.DistanceCoveragePercent,
+            readiness.ZDistanceEvidenceHealthPercent,
             readiness.ExpressionCoveragePercent,
             readiness.IdentityCoveragePercent,
             readiness.ContourShapeCoveragePercent,
+            readiness.ContourDepthProfileHealthPercent,
+            readiness.SurfaceShapeCoveragePercent,
+            readiness.SurfaceDepthProfileHealthPercent,
+            readiness.SurfaceGeometryHealthPercent,
             readiness.EyeBehindGlassesTrustPercent,
             readiness.MouthJawTrustPercent,
             readiness.DirectFeatureMeasurementTrustPercent,
+            readiness.ApertureConsistencyHealthPercent,
             readiness.QualityCoveragePercent,
             readiness.CaptureQualityCoveragePercent,
-            readiness.StorageHealthPercent
+            readiness.StorageHealthPercent,
+            readiness.DataAuditHealthPercent
         }.Min());
 
         AddDefaultRules(plan);
@@ -71,9 +78,9 @@ public sealed class MeasurementAvatarCapturePlanBuilder
     private static void AddDefaultRules(MeasurementAvatarCapturePlan plan)
     {
         plan.PreSessionChecks.Add("Confirm the checkbox says this is the enrolled subject before collecting measurements.");
-        plan.PreSessionChecks.Add("Use the normal glasses/camera/lighting setup whenever possible so the corpus matches real use.");
+        plan.PreSessionChecks.Add("Use the normal glasses/camera/lighting setup whenever possible so the learning data matches real use.");
         plan.PreSessionChecks.Add("Use 4K tracking when practical, disable face filters/background effects, and keep lighting soft enough to reduce glasses glare.");
-        plan.StopRules.Add("Stop or pause collection immediately if sleepiness/cataplexy symptoms begin.");
+        plan.StopRules.Add("Pause alert-baseline collection if sleepiness/cataplexy symptoms begin; labeled sleepy-state motion can still be useful when intentionally captured.");
         plan.StopRules.Add("Stop if someone else is in front of the camera or the subject checkbox is not correct.");
         plan.StopRules.Add("Do not collect raw media for passive learning; use explicit training-media sessions only when a future 3D worker asks for it.");
     }
@@ -100,6 +107,41 @@ public sealed class MeasurementAvatarCapturePlanBuilder
             return;
         }
 
+        if (readiness.DataAuditHealthPercent < 75d)
+        {
+            var instructions = readiness.DataAuditFindings.Count > 0
+                ? string.Join(" ", readiness.DataAuditFindings.Take(2))
+                : "Review the tracking overlay and generated avatar preview for pose, jaw, or feature anchoring issues before collecting more data.";
+            AddItem(
+                plan,
+                "data-audit-review",
+                Priority(readiness.DataAuditHealthPercent),
+                "Data Audit",
+                "Review tracking consistency",
+                instructions,
+                "Bad pose or feature anchoring data can make the avatar learn a face that slides around instead of a head that rotates.",
+                "DataAuditHealthPercent",
+                readiness.DataAuditHealthPercent,
+                2,
+                "Data audit health is at least 75% with no high-priority tracking consistency findings.");
+        }
+
+        if (readiness.PoseExplainedFeatureMotionHealthPercent is > 0d and < 70d)
+        {
+            AddItem(
+                plan,
+                "pose-explained-feature-review",
+                Priority(readiness.PoseExplainedFeatureMotionHealthPercent),
+                "Data Audit",
+                "Review head-turn feature motion",
+                "Open the overlay or face preview during a slow B-axis left/right head turn. The head should rotate while the eyes, mouth, and nose remain attached to the face instead of sliding sideways.",
+                "This prevents the avatar from learning head turns as changes to the user's face shape.",
+                "PoseExplainedFeatureMotionHealthPercent",
+                readiness.PoseExplainedFeatureMotionHealthPercent,
+                2,
+                "Pose-explained feature motion health is at least 70%.");
+        }
+
         if (readiness.StorageHealthPercent < 85d || readiness.MeasurementBudgetUsedPercent > 80d)
         {
             AddItem(
@@ -109,7 +151,7 @@ public sealed class MeasurementAvatarCapturePlanBuilder
                 "Storage",
                 "Protect the measurement budget",
                 "Keep the output folder on the external drive and archive explicit training media before collecting more.",
-                "The measurement corpus must stay under the 10 GB target without silently filling the local drive.",
+                "The measurement data must stay under the 10 GB target without silently filling the local drive.",
                 "StorageHealthPercent",
                 readiness.StorageHealthPercent,
                 0,
@@ -164,6 +206,134 @@ public sealed class MeasurementAvatarCapturePlanBuilder
                 "Face width and height ranges cover close, normal, and leaned-back positions.");
         }
 
+        if (readiness.ZDistanceCoveragePercent < 70d)
+        {
+            AddItem(
+                plan,
+                "z-distance-pass",
+                Priority(readiness.ZDistanceCoveragePercent),
+                "XYZABC",
+                "Z distance pass",
+                "Sit at normal distance, lean closer, then lean back while keeping the whole face visible and glasses reflections low.",
+                "Z coverage teaches the model that face-size changes are camera distance, not a different face shape.",
+                "ZDistanceCoveragePercent",
+                readiness.ZDistanceCoveragePercent,
+                4,
+                "Z distance coverage is at least 70%.");
+        }
+
+        if (readiness.ZDistanceEvidenceHealthPercent < 70d)
+        {
+            AddItem(
+                plan,
+                "z-evidence-calibration",
+                Priority(readiness.ZDistanceEvidenceHealthPercent),
+                "XYZABC",
+                "Strengthen Z evidence",
+                "Keep webcam zoom fixed, collect close/normal/far positions in one pass, and later add one known-distance reference if physical inches matter.",
+                "Explicit Z evidence keeps close/far movement from being learned as a new face shape.",
+                "ZDistanceEvidenceHealthPercent",
+                readiness.ZDistanceEvidenceHealthPercent,
+                4,
+                "Z evidence health is at least 70% with stable zoom/reference support.");
+        }
+
+        if (readiness.SurfaceDepthProfileHealthPercent < 70d)
+        {
+            AddItem(
+                plan,
+                "surface-z-profile-pass",
+                Priority(readiness.SurfaceDepthProfileHealthPercent),
+                "XYZABC",
+                "Surface Z profile pass",
+                "Collect a slow front-neutral pass, then small B-axis three-quarter turns and slight A-axis up/down tilts with forehead, brows, nose bridge, and cheeks visible.",
+                "This teaches the avatar which brow/nose/cheek/forehead points have real depth instead of drawing a flat face with lines on it.",
+                "SurfaceDepthProfileHealthPercent",
+                readiness.SurfaceDepthProfileHealthPercent,
+                5,
+                "Surface Z profile health is at least 70%.");
+        }
+
+        if (readiness.SurfaceGeometryPatchCount > 0 && readiness.SurfaceGeometryHealthPercent < 70d)
+        {
+            AddItem(
+                plan,
+                "surface-geometry-review-pass",
+                Priority(readiness.SurfaceGeometryHealthPercent),
+                "XYZABC",
+                "Surface geometry review pass",
+                "Open the measurement face preview, inspect Surface Patch Geometry, then collect slow stable frames for the regions marked review: thin mouth openings, nose bridge, cheeks, brows, and forehead.",
+                "This prevents folded or uneven measured patches from being treated as a stable face surface in the long-term avatar model.",
+                "SurfaceGeometryHealthPercent",
+                readiness.SurfaceGeometryHealthPercent,
+                4,
+                "Surface geometry health is at least 70% with no review patches.");
+        }
+
+        if (readiness.ContourDepthProfileHealthPercent < 65d)
+        {
+            AddItem(
+                plan,
+                "feature-contour-z-profile-pass",
+                Priority(readiness.ContourDepthProfileHealthPercent),
+                "XYZABC",
+                "Feature contour Z profile pass",
+                "Collect slow blinks, lips closed/open, and gentle jaw-drop frames while holding the head steady, then repeat with small left/right turns.",
+                "This keeps eyelids, lips, and jaw contours measurable in 3D rather than only as flat outlines.",
+                "ContourDepthProfileHealthPercent",
+                readiness.ContourDepthProfileHealthPercent,
+                4,
+                "Feature contour Z profile health is at least 65%.");
+        }
+
+        if (readiness.ARotationAroundXCoveragePercent < 70d)
+        {
+            AddItem(
+                plan,
+                "a-rotation-pass",
+                Priority(readiness.ARotationAroundXCoveragePercent),
+                "XYZABC",
+                "A rotation around X pass",
+                "Slowly tilt the head slightly up and down while keeping eyes, brows, nose, and mouth visible.",
+                "A coverage separates up/down head tilt from eyebrow, eyelid, nose, and mouth movement.",
+                "ARotationAroundXCoveragePercent",
+                readiness.ARotationAroundXCoveragePercent,
+                4,
+                "A rotation around X coverage is at least 70%.");
+        }
+
+        if (readiness.BRotationAroundYCoveragePercent < 70d)
+        {
+            AddItem(
+                plan,
+                "b-rotation-pass",
+                Priority(readiness.BRotationAroundYCoveragePercent),
+                "XYZABC",
+                "B rotation around Y pass",
+                "Slowly turn left and right through straight-on and three-quarter views while keeping both eyes and the mouth measurable.",
+                "B coverage is the main evidence that face features are rotating with the head instead of sliding sideways.",
+                "BRotationAroundYCoveragePercent",
+                readiness.BRotationAroundYCoveragePercent,
+                5,
+                "B rotation around Y coverage is at least 70%.");
+        }
+
+        if (readiness.CRotationAroundZCoveragePercent < 70d)
+        {
+            AddItem(
+                plan,
+                "c-rotation-pass",
+                Priority(readiness.CRotationAroundZCoveragePercent),
+                "XYZABC",
+                "C rotation around Z pass",
+                "Gently tilt the head side-to-side while keeping glasses glare low and the mouth visible.",
+                "C coverage separates head tilt from eyelid and lip opening measurements.",
+                "CRotationAroundZCoveragePercent",
+                readiness.CRotationAroundZCoveragePercent,
+                4,
+                "C rotation around Z coverage is at least 70%.");
+        }
+
         if (readiness.PoseCoveragePercent < 70d)
         {
             AddItem(
@@ -172,12 +342,12 @@ public sealed class MeasurementAvatarCapturePlanBuilder
                 Priority(readiness.PoseCoveragePercent),
                 "Pose",
                 "Head pose sweep",
-                "Slowly turn left/right, look slightly up/down, and add a few gentle head-roll positions while keeping the face visible.",
-                "Face reconstruction and mouth/eye tracking need the same person across realistic head angles.",
+                "Slowly turn left/right through straight-on, three-quarter, and near-side B-axis views; then add slight A-axis up/down tilt and a few gentle C-axis head-tilt positions while keeping the face visible.",
+                "Side and three-quarter frames help reconstruct nose projection, cheek volume, and forehead depth instead of treating head rotation as sliding facial features.",
                 "PoseCoveragePercent",
                 readiness.PoseCoveragePercent,
-                6,
-                "Yaw, pitch, and roll coverage are all broad enough for the readiness report.");
+                8,
+                "A, B, and C rotation coverage includes enough straight-on, three-quarter, and side evidence for the readiness report.");
         }
 
         if (readiness.PoseBucketCoveragePercent < 70d && readiness.PoseBuckets.Count > 0)
@@ -194,7 +364,7 @@ public sealed class MeasurementAvatarCapturePlanBuilder
                     "Pose Bucket",
                     bucket.Label,
                     bucket.CaptureInstruction,
-                    "Pose-specific buckets keep straight-on identity, turned-head evidence, and animation correction from being averaged into the same face shape.",
+                    "Pose-specific buckets keep straight-on identity, side-depth evidence, turned-head motion, and animation correction from being averaged into the same face shape.",
                     "PoseBucketCoveragePercent",
                     readiness.PoseBucketCoveragePercent,
                     bucket.PrimaryNeutralReference ? 5 : 3,
@@ -216,6 +386,22 @@ public sealed class MeasurementAvatarCapturePlanBuilder
                 readiness.ExpressionCoveragePercent,
                 8,
                 "Eye opening, mouth opening, jaw droop, and dense blendshape ranges are all broad enough.");
+        }
+
+        if (readiness.ApertureConsistencyHealthPercent < 75d)
+        {
+            AddItem(
+                plan,
+                "aperture-corroboration",
+                Priority(readiness.ApertureConsistencyHealthPercent),
+                "Aperture Consistency",
+                "Corroborate eye mouth jaw openings",
+                "Collect alert frames with slow blinks, eyes relaxed/open, lips closed/slightly open, natural speech, and gentle jaw drop while keeping glasses glare low.",
+                "The narcolepsy tracker and avatar both need eyelid, lip, and jaw opening measurements that agree with dense blink and mouth evidence.",
+                "ApertureConsistencyHealthPercent",
+                readiness.ApertureConsistencyHealthPercent,
+                5,
+                "Aperture consistency is above 75% and no data-audit finding says eye, mouth, or jaw aperture evidence disagrees.");
         }
 
         if (readiness.IdentityCoveragePercent < 70d)
@@ -250,20 +436,23 @@ public sealed class MeasurementAvatarCapturePlanBuilder
                 "Contour shape coverage is at least 70% for direct eye, lip, and jaw observations.");
         }
 
-        if (readiness.EyeBehindGlassesTrustPercent < 70d)
+        var eyeCaptureScore = Math.Min(readiness.EyeBehindGlassesTrustPercent, readiness.EyeApertureReliabilityHealthPercent);
+        if (eyeCaptureScore < 70d)
         {
             AddItem(
                 plan,
                 "eye-glasses-trust",
-                Priority(readiness.EyeBehindGlassesTrustPercent),
+                Priority(eyeCaptureScore),
                 "Eye Trust",
                 "Behind-glasses eye accuracy pass",
                 "Collect alert frames with glasses on, both eyes visible, screen glare minimized, and slow open-relaxed-blink eyelid changes.",
                 "Eye closure is the primary sleep/cataplexy cue, so avatar and narcolepsy tracking need direct eye evidence behind glasses.",
-                "EyeBehindGlassesTrustPercent",
-                readiness.EyeBehindGlassesTrustPercent,
+                readiness.EyeApertureReliabilityHealthPercent < readiness.EyeBehindGlassesTrustPercent
+                    ? "EyeApertureReliabilityHealthPercent"
+                    : "EyeBehindGlassesTrustPercent",
+                eyeCaptureScore,
                 6,
-                "Eye-behind-glasses trust is at least 70% with direct, non-reconstructed eye contours.");
+                "Eye-behind-glasses trust and eye aperture reliability are at least 70% with direct, non-reconstructed eye contours.");
         }
 
         if (readiness.MouthJawTrustPercent < 70d)
@@ -307,7 +496,7 @@ public sealed class MeasurementAvatarCapturePlanBuilder
                 "Capture Quality",
                 "Avatar-grade capture pass",
                 "Set the camera to explicit 4K/30fps, keep the face comfortably large in frame, reduce glasses glare, and collect a short neutral segment.",
-                "Extreme accuracy needs measurements that were good enough to enter the long-term corpus, not just frames that were reviewable.",
+                "Extreme accuracy needs measurements that were good enough to enter the long-term learning data, not just frames that were reviewable.",
                 "CaptureQualityCoveragePercent",
                 readiness.CaptureQualityCoveragePercent,
                 4,
@@ -324,7 +513,7 @@ public sealed class MeasurementAvatarCapturePlanBuilder
             "Maintenance",
             "Balanced maintenance session",
             "Run a short symptom-free session that includes normal posture, a few head turns, natural speech, slow blinks, and a distance change.",
-            "The corpus is strong enough for maintenance; balanced measurements keep it current without rapid daily jumps.",
+            "The learning data is strong enough for maintenance; balanced measurements keep it current without rapid daily jumps.",
             "OverallReadinessPercent",
             readiness.OverallReadinessPercent,
             8,
