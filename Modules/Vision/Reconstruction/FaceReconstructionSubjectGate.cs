@@ -1,16 +1,22 @@
-using EpisodeMonitor.Modules.Vision.Personalization;
-
 namespace EpisodeMonitor.Modules.Vision.Reconstruction;
 
 public sealed class FaceReconstructionSubjectGate
 {
-    public string SubjectId { get; set; } = PersonalFaceSubject.DefaultSubjectId;
+    public const string DefaultSubjectId = "chris";
 
-    public string SubjectDisplayName { get; set; } = PersonalFaceSubject.DefaultSubjectDisplayName;
+    public const string DefaultSubjectDisplayName = "Chris";
 
-    public string SubjectCollectionMode { get; set; } = PersonalFaceSubject.ManualConfirmationMode;
+    public const string ManualConfirmationMode = "manual-confirmation";
 
-    public string UnknownSubjectPolicy { get; set; } = PersonalFaceSubject.UnknownSubjectPolicy;
+    public const string DefaultUnknownSubjectPolicy = "reject";
+
+    public string SubjectId { get; set; } = DefaultSubjectId;
+
+    public string SubjectDisplayName { get; set; } = DefaultSubjectDisplayName;
+
+    public string SubjectCollectionMode { get; set; } = ManualConfirmationMode;
+
+    public string UnknownSubjectPolicy { get; set; } = DefaultUnknownSubjectPolicy;
 
     public bool ManualSubjectConfirmed { get; set; }
 
@@ -20,8 +26,9 @@ public sealed class FaceReconstructionSubjectGate
 
     public string Reason { get; set; } = "subject not confirmed";
 
-    public static FaceReconstructionSubjectGate FromPersonalModel(
-        PersonalFaceModel model,
+    public static FaceReconstructionSubjectGate FromAvatarProfile(
+        string subjectId,
+        string subjectDisplayName,
         bool manualSubjectConfirmed,
         double? identityConfidencePercent = null,
         string? reason = null)
@@ -30,24 +37,16 @@ public sealed class FaceReconstructionSubjectGate
             && (identityConfidencePercent is null or >= 80d);
         return new FaceReconstructionSubjectGate
         {
-            SubjectId = string.IsNullOrWhiteSpace(model.SubjectId)
-                ? PersonalFaceSubject.DefaultSubjectId
-                : model.SubjectId,
-            SubjectDisplayName = string.IsNullOrWhiteSpace(model.SubjectDisplayName)
-                ? PersonalFaceSubject.DefaultSubjectDisplayName
-                : model.SubjectDisplayName,
-            SubjectCollectionMode = string.IsNullOrWhiteSpace(model.SubjectCollectionMode)
-                ? PersonalFaceSubject.ManualConfirmationMode
-                : model.SubjectCollectionMode,
-            UnknownSubjectPolicy = string.IsNullOrWhiteSpace(model.UnknownSubjectPolicy)
-                ? PersonalFaceSubject.UnknownSubjectPolicy
-                : model.UnknownSubjectPolicy,
+            SubjectId = string.IsNullOrWhiteSpace(subjectId) ? DefaultSubjectId : subjectId,
+            SubjectDisplayName = string.IsNullOrWhiteSpace(subjectDisplayName) ? DefaultSubjectDisplayName : subjectDisplayName,
+            SubjectCollectionMode = ManualConfirmationMode,
+            UnknownSubjectPolicy = DefaultUnknownSubjectPolicy,
             ManualSubjectConfirmed = manualSubjectConfirmed,
             IdentityConfidencePercent = identityConfidencePercent,
             GateDecision = accepted ? "accepted" : "paused",
             Reason = reason ?? (accepted
-                ? "subject confirmed for reconstruction learning data"
-                : "subject not confirmed strongly enough for reconstruction learning data")
+                ? "subject confirmed for avatar reconstruction"
+                : "subject not confirmed strongly enough for avatar reconstruction")
         };
     }
 }

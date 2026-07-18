@@ -51,7 +51,7 @@ public sealed class LandmarkEventTimeline
         FaceLandmarkTrendAnalysis trendAnalysis,
         FaceLockStabilityAnalysis stabilityAnalysis,
         string backendStatus,
-        PersonalFaceCaptureQualityAssessment? captureQuality)
+        AvatarCaptureQualityAssessment? captureQuality)
     {
         var capturedAtUtc = metrics.CapturedAtUtc == default
             ? DateTime.UtcNow

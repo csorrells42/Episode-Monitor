@@ -135,6 +135,15 @@
             <Setter Property="Margin" Value="0,7,0,0" />
         </Style>
 
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#0f1720" />
+            <Setter Property="Foreground" Value="#f5f8fb" />
+            <Setter Property="BorderBrush" Value="#37506a" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CaretBrush" Value="#f5f8fb" />
+            <Setter Property="Padding" Value="8,5" />
+        </Style>
+
         <Style TargetType="Expander">
             <Setter Property="Foreground" Value="#f5f8fb" />
             <Setter Property="Background" Value="#101820" />
@@ -361,9 +370,21 @@
                         <Border Background="#0c1218" BorderBrush="#243545" BorderThickness="1" Padding="12">
                             <StackPanel>
                                 <TextBlock Text="Avatar Building" FontSize="20" FontWeight="Bold" />
-                                <TextBlock Text="Collects measurement-only face movement data for future avatar and 3D systems." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,8" />
+                                <TextBlock Text="Captures 3DDFA face reconstruction data while keeping live eye, jaw, and brow tracking available for review." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,8" />
 
-                                <CheckBox x:Name="PersonalModelSubjectCheckBox" Content="This is Chris - collect my face model" ToolTip="Allows measurement-only learning for Chris; leave unchecked when someone else is at the camera." Checked="PersonalModelSubjectChanged" Unchecked="PersonalModelSubjectChanged" />
+                                <TextBlock Text="Avatar user" FontWeight="SemiBold" Margin="0,4,0,0" />
+                                <ComboBox x:Name="AvatarProfileComboBox" DisplayMemberPath="DisplayName" SelectionChanged="AvatarProfileSelectionChanged" />
+                                <Grid Margin="0,8,0,0">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="AvatarProfileNameTextBox" MinHeight="32" MinWidth="160" ToolTip="Type a consenting person's name to create or switch to their avatar profile." />
+                                    <Button Grid.Column="1" Content="Add User" Margin="8,0,0,0" Padding="10,6" MinHeight="32" Click="AddAvatarProfileClicked" />
+                                </Grid>
+                                <TextBlock x:Name="AvatarProfileStatusText" Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,8" />
+
+                                <CheckBox x:Name="AvatarSubjectCheckBox" Content="This is the selected user - allow avatar capture" ToolTip="Turn this on only when the selected avatar user is in front of the camera." Checked="AvatarSubjectChanged" Unchecked="AvatarSubjectChanged" />
 
                                 <Border Background="#081018" BorderBrush="#243545" BorderThickness="1" Padding="10" Margin="0,10,0,0">
                                     <StackPanel>
@@ -374,22 +395,24 @@
                                                 <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
                                             <Border x:Name="AvatarLearningIndicator" Width="11" Height="11" CornerRadius="6" Background="#59616b" Margin="0,0,8,0" VerticalAlignment="Center" />
-                                            <TextBlock x:Name="AvatarLearningStateText" Grid.Column="1" Text="Avatar learning stopped" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="Wrap" />
-                                            <Button x:Name="AvatarLearningToggleButton" Grid.Column="2" Style="{StaticResource StartStopButtonStyle}" Content="Start Avatar Learning" ToolTip="Starts or stops measurement-only learning for the Avatar System. Event recording is separate." Padding="10,6" Margin="8,0,0,0" Click="AvatarLearningToggleClicked" />
+                                            <TextBlock x:Name="AvatarLearningStateText" Grid.Column="1" Text="Avatar capture stopped" FontWeight="SemiBold" VerticalAlignment="Center" TextWrapping="Wrap" />
+                                            <Button x:Name="AvatarLearningToggleButton" Grid.Column="2" Style="{StaticResource StartStopButtonStyle}" Content="Start Avatar Capture" ToolTip="Starts or stops 3DDFA avatar capture. Event recording is separate." Padding="10,6" Margin="8,0,0,0" Click="AvatarLearningToggleClicked" />
                                         </Grid>
-                                        <TextBlock x:Name="AvatarLearningStatusText" Text="Not learning: confirm Chris, then start avatar learning when you are symptom-free." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,0" />
+                                        <TextBlock x:Name="AvatarLearningStatusText" Text="Not capturing: select the correct user, confirm they are at the camera, then start avatar capture." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,8,0,0" />
                                         <TextBlock x:Name="AvatarTrackingSanityText" Text="Tracking sanity: waiting for enough accepted measurements." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
+                                        <TextBlock x:Name="AvatarReconstructionLaneText" Text="Avatar reconstruction: 3DDFA/ONNX waiting." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
                                         <Border Background="#0b141c" BorderBrush="#243545" BorderThickness="1" Padding="10" Margin="0,10,0,0">
                                             <StackPanel>
-                                                <TextBlock x:Name="AvatarEasyModeTitleText" Text="Easy Avatar Mode" FontWeight="SemiBold" TextWrapping="Wrap" />
-                                                <TextBlock x:Name="AvatarEasyModeDetailText" Text="Confirm Chris, start the camera, then use easy mode for the next recommended avatar capture." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
-                                                <Button x:Name="AvatarEasyModeButton" Style="{StaticResource StartStopButtonStyle}" Content="Easy Avatar Mode" ToolTip="Starts guided measurement-only avatar learning and follows the next capture-plan recommendation." HorizontalAlignment="Left" Padding="10,6" Margin="0,8,0,0" Click="AvatarEasyModeClicked" />
+                                                <TextBlock x:Name="AvatarCaptureGuidanceTitleText" Text="Capture Guidance" FontWeight="SemiBold" TextWrapping="Wrap" />
+                                                <TextBlock x:Name="AvatarCaptureGuidanceDetailText" Text="Select the correct user, start the camera, then use Start Avatar Capture when you want 3DDFA samples collected." Foreground="#b9d7ef" TextWrapping="Wrap" Margin="0,6,0,0" />
                                             </StackPanel>
                                         </Border>
                                         <UniformGrid Columns="2" Margin="0,10,0,0">
-                                            <Button Content="Open Avatar System" ToolTip="Opens one combined page for face preview, learning data, collection audit, avatar package, and next capture plan." Margin="0,0,6,0" Click="OpenAvatarSystemClicked" />
-                                            <Button Content="Open Last 10 Good Features" ToolTip="Opens the rolling dense landmark mesh viewer for the latest ten good feature locks." Margin="6,0,0,0" Click="OpenLastGoodFeaturesClicked" />
-                                            <Button x:Name="RebuildAvatarDataButton" Content="Rebuild Avatar Data" ToolTip="Archives the current Avatar measurements and starts a fresh measurement-only model." Margin="0,8,6,0" Click="RebuildAvatarDataClicked" />
+                                            <Button Content="Open Avatar System" ToolTip="Opens one combined page for 3DDFA reconstruction, live tracking review, stored avatar data, and next capture guidance." Margin="0,0,6,0" Click="OpenAvatarSystemClicked" />
+                                            <Button Content="Open MediaPipe Last 5" ToolTip="Opens the lightweight rolling viewer for the last five fast feature-lock samples." Margin="6,0,0,0" Click="OpenLastGoodFeaturesClicked" />
+                                            <Button Content="Open 3DDFA Last 5" ToolTip="Opens the separate dense 3DDFA reconstruction viewer for the last five avatar samples." Margin="0,8,6,0" Click="OpenLastGoodThreeDdfaClicked" />
+                                            <Button Content="Open Avatar Model Progress" ToolTip="Opens the accumulated 3DDFA identity and expression model viewer." Margin="6,8,0,0" Click="OpenAvatarModelProgressClicked" />
+                                            <Button x:Name="RebuildAvatarDataButton" Content="Rebuild Avatar Data" ToolTip="Archives the current Avatar data and starts fresh review/capture files." Margin="0,8,6,0" Click="RebuildAvatarDataClicked" />
                                         </UniformGrid>
                                     </StackPanel>
                                 </Border>

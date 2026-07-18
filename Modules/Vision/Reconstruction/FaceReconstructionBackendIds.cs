@@ -3,5 +3,5 @@ namespace EpisodeMonitor.Modules.Vision.Reconstruction;
 public static class FaceReconstructionBackendIds
 {
     public const string MeasurementOnlyPreview = "measurement-only-preview";
-    public const string Deep3DFaceReconPytorchSidecar = "deep3d-face-recon-pytorch-sidecar";
+    public const string ThreeDdfaV2OnnxReconstruction = "3ddfa-v2-onnx-reconstruction";
 }

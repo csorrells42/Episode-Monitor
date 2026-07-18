@@ -1,39 +1,12 @@
 using EpisodeMonitor.Modules.Vision.Common;
+using EpisodeMonitor.Modules.Vision.MediaPipe;
 
 namespace EpisodeMonitor.Modules.Vision.Reconstruction;
 
 public static class LastGoodFeatureMeshWireframeBuilder
 {
     private const int MinimumSurfacePointCount = 24;
-    private const double MaximumScaffoldEdgeLengthPercent = 42d;
-
-    private static readonly (int From, int To)[] CuratedSurfaceScaffoldEdges =
-    [
-        (109, 70), (67, 63), (103, 105), (54, 107), (10, 168),
-        (284, 336), (332, 334), (297, 293), (338, 300),
-
-        (70, 33), (63, 246), (105, 161), (66, 160), (107, 159),
-        (55, 158), (65, 157), (52, 173), (53, 133), (46, 133),
-        (336, 362), (296, 398), (334, 384), (293, 385), (300, 386),
-        (285, 387), (295, 388), (282, 466), (283, 263), (276, 263),
-
-        (33, 234), (7, 93), (163, 132), (145, 58), (133, 168), (133, 6),
-        (362, 168), (362, 6), (263, 454), (249, 323), (390, 361), (374, 288),
-
-        (168, 107), (168, 336), (6, 197), (197, 5), (195, 4), (5, 1),
-        (4, 19), (19, 94), (94, 2),
-        (98, 61), (97, 0), (2, 13), (326, 267), (327, 291),
-        (98, 234), (97, 132), (326, 361), (327, 454),
-
-        (234, 33), (93, 7), (132, 163), (58, 145), (172, 61), (136, 91),
-        (454, 263), (323, 249), (361, 390), (288, 374), (397, 291), (365, 321),
-
-        (61, 172), (146, 172), (91, 150), (84, 176), (17, 152),
-        (314, 400), (321, 397), (291, 397),
-
-        (127, 70), (162, 63), (21, 105), (251, 336), (389, 296), (356, 334),
-        (234, 127), (454, 356), (152, 17), (148, 84), (377, 314)
-    ];
+    private const double MaximumTessellationEdgeLengthPercent = 18d;
 
     public static List<LastGoodFeatureMeshWireframeEdge> Build(
         IReadOnlyList<FaceMeshLandmarkPoint> points,
@@ -81,7 +54,7 @@ public static class LastGoodFeatureMeshWireframeBuilder
         }
 
         var lookup = points.ToDictionary(static point => point.Index);
-        foreach (var (fromIndex, toIndex) in CuratedSurfaceScaffoldEdges)
+        foreach (var (fromIndex, toIndex) in MediaPipeFaceMeshTopology.TessellationEdges)
         {
             if (!lookup.TryGetValue(fromIndex, out var a) || !lookup.TryGetValue(toIndex, out var b))
             {
@@ -90,7 +63,7 @@ public static class LastGoodFeatureMeshWireframeBuilder
 
             var threeDimensionalLength = Distance3d(a, b);
             var lengthPercent = threeDimensionalLength / scale * 100d;
-            if (lengthPercent > MaximumScaffoldEdgeLengthPercent)
+            if (lengthPercent > MaximumTessellationEdgeLengthPercent)
             {
                 continue;
             }
@@ -100,7 +73,7 @@ public static class LastGoodFeatureMeshWireframeBuilder
                 FromIndex = Math.Min(a.Index, b.Index),
                 ToIndex = Math.Max(a.Index, b.Index),
                 Role = "surface",
-                Source = "curated-facial-scaffold",
+                Source = MediaPipeFaceMeshTopology.TessellationSource,
                 LengthPercent = Round(lengthPercent),
                 ConfidencePercent = Round(Math.Clamp(trackingConfidencePercent, 0d, 100d))
             };

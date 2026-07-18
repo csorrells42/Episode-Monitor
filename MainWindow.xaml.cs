@@ -16,6 +16,7 @@ using EpisodeMonitor.Modules.Infrastructure;
 using EpisodeMonitor.Modules.Recording;
 using EpisodeMonitor.Modules.Vision.Analysis;
 using EpisodeMonitor.Modules.Vision.Common;
+using EpisodeMonitor.Modules.Vision.Onnx;
 using EpisodeMonitor.Modules.Vision.Personalization;
 using EpisodeMonitor.Modules.Vision.Pipeline;
 using EpisodeMonitor.Modules.Vision.Reconstruction;
@@ -38,12 +39,10 @@ public partial class MainWindow : Window
 {
     private const double EventVideoFramesPerSecond = 10d;
     private const int PreEventVideoSeconds = 60;
-    private const string PersonalFaceSubjectId = "chris";
-    private const string PersonalFaceSubjectDisplayName = "Chris";
+    private const string DefaultAvatarProfileId = "chris";
+    private const string DefaultAvatarProfileDisplayName = "Chris";
     private const string PreferredExternalOutputFolder = @"D:\Episode Monitor Output";
-    private const string SettingsFileName = "EpisodeMonitorSettings.json";
-    private const int PersonalFaceMotionModelMaxSamples = PersonalFaceMeasurementJournal.DefaultRecentSampleReadLimit;
-    private const int PersonalFaceCollectionAuditMaxObservations = 6000;
+    private const string OutputFolderPointerFileName = "EpisodeMonitorOutputFolder.txt";
     private const string AlertBaselineFolderName = "AlertBaseline";
     private const string AlertBaselineFileName = "alert_baseline.json";
     private const string AlertBaselineStartButtonText = "Calibrate Alert Baseline";
@@ -52,18 +51,17 @@ public partial class MainWindow : Window
     private const string SleepEventWatchStopButtonText = "Stop Sleep Event Watch";
     private const string SymptomCaptureStartButtonText = "Capture Symptoms";
     private const string SymptomCaptureStopButtonText = "Stop Capture";
-    private const string AvatarLearningStartButtonText = "Start Avatar Learning";
-    private const string AvatarLearningStopButtonText = "Stop Avatar Learning";
-    private const double PersonalFaceLiveReportSaveIntervalSeconds = 10d;
-    private const double PersonalFaceDataAuditBlockThresholdPercent = 50d;
-    private const int PersonalFaceDataAuditMinimumSamplesToBlock = 60;
-    private const int PersonalFacePoseReferenceMinimumSamples = 12;
+    private const string AvatarLearningStartButtonText = "Start Avatar Capture";
+    private const string AvatarLearningStopButtonText = "Stop Avatar Capture";
+    private const string AvatarCaptureStatusReason = "3DDFA avatar capture active; MediaPipe cue tracking remains live";
+    private const double AvatarReportSaveIntervalSeconds = 30d;
+    private const int LastGoodFeatureMeshRetainedSampleCount = 5;
+    private const int LastGoodThreeDdfaRetainedSampleCount = 5;
     private const int LastGoodFeatureMeshStabilityMinimumSamplesToHold = 3;
     private const double LastGoodFeatureMeshStabilityHoldThresholdPercent = 62d;
     private const double LastGoodFeatureMeshBRotationMinimumRangeDegrees = 14d;
     private const double Insta360Link2ProHorizontalFovDegrees = 71.4d;
-    private const string PersonalFaceModelFolderName = "PersonalFaceModel";
-    private const string PersonalFaceArchiveFolderName = "PersonalFaceModelArchive";
+    private const string AvatarArchiveFolderName = "AvatarArchive";
     private static readonly TimeSpan CalibrationSymptomFreeWindow = TimeSpan.FromHours(1);
     private static readonly TimeSpan TrackingOverlayRefreshInterval = TimeSpan.FromMilliseconds(250);
     private static readonly TimeSpan FaceFeatureDetectionTargetInterval = TimeSpan.FromMilliseconds(120);
@@ -95,21 +93,18 @@ public partial class MainWindow : Window
     private readonly FaceLandmarkCueAnalyzer _faceLandmarkCueAnalyzer = new();
     private readonly FaceLandmarkTrendAnalyzer _faceLandmarkTrendAnalyzer = new();
     private readonly FaceLockStabilityAnalyzer _faceLockStabilityAnalyzer = new();
-    private readonly HeadPoseEstimator _headPoseEstimator = new();
+    private readonly FaceFrameGeometryEstimator _faceFrameGeometryEstimator = new();
+    private readonly ThreeDdfaOnnxModelInfo _threeDdfaOnnxModelInfo;
+    private readonly ThreeDdfaOnnxSidecarEnvironment _threeDdfaOnnxEnvironment;
+    private readonly ThreeDdfaOnnxReconstructionClient _threeDdfaOnnxClient;
     private readonly EpisodeMonitorStartupOptions _startupOptions;
-    private readonly PersonalFaceModelBuilder _personalFaceModelBuilder = new(
-        PersonalFaceSubjectId,
-        PersonalFaceSubjectDisplayName,
-        PersonalFaceSubject.ManualConfirmationMode);
-    private readonly PersonalFaceModelStore _personalFaceModelStore = new();
-    private readonly PersonalFaceMeasurementJournal _personalFaceMeasurementJournal = new();
-    private readonly PersonalFaceCaptureQualityAnalyzer _personalFaceCaptureQualityAnalyzer = new();
-    private readonly PersonalFaceMotionModelStore _personalFaceMotionModelStore = new();
-    private readonly PersonalFaceCollectionAuditBuilder _personalFaceCollectionAuditBuilder = new();
+    private readonly AvatarProfileStore _avatarProfileStore = new();
+    private readonly AvatarCaptureQualityAnalyzer _avatarCaptureQualityAnalyzer = new();
     private readonly LandmarkEventAggregate _landmarkEventAggregate = new();
     private readonly LandmarkEventTimeline _landmarkEventTimeline = new();
     private readonly EpisodeEventDatabase _eventDatabase = new();
     private readonly LastGoodFeatureMeshStore _lastGoodFeatureMeshStore = new();
+    private readonly LastGoodThreeDdfaStore _lastGoodThreeDdfaStore = new();
     private readonly object _faceLandmarkTrackerLock = new();
     private readonly ObservableCollection<EpisodeMonitorEvent> _events = [];
     private readonly object _frameLock = new();
@@ -119,8 +114,9 @@ public partial class MainWindow : Window
     private readonly object _faceFeatureDetectionFrameLock = new();
     private readonly object _personalFaceReportWriterLock = new();
     private readonly Queue<BufferedVideoFrame> _preEventVideoFrames = new();
-    private readonly List<PersonalFaceCollectionAuditObservation> _personalFaceCollectionAuditObservations = [];
     private readonly List<LastGoodFeatureMeshSample> _lastGoodFeatureMeshSamples = [];
+    private readonly List<LastGoodFeatureThreeDdfaSnapshot> _lastGoodThreeDdfaSamples = [];
+    private readonly ObservableCollection<AvatarProfile> _avatarProfiles = [];
     private readonly DispatcherTimer _calibrationGuardTimer = new() { Interval = TimeSpan.FromSeconds(5) };
 
     private IReadOnlyList<CameraDevice> _cameras = [];
@@ -135,13 +131,16 @@ public partial class MainWindow : Window
     private FaceLandmarkCueAnalysis? _currentFaceLandmarkCueAnalysis;
     private FaceLandmarkTrendAnalysis _currentFaceLandmarkTrendAnalysis = FaceLandmarkTrendAnalysis.Waiting;
     private FaceLockStabilityAnalysis _currentFaceLockStabilityAnalysis = FaceLockStabilityAnalysis.Waiting;
-    private HeadPoseEstimate _currentHeadPoseEstimate = HeadPoseEstimate.None;
-    private PersonalFaceModelUpdate _currentPersonalFaceModelUpdate;
-    private PersonalFaceCaptureQualityAssessment _currentPersonalFaceCaptureQuality = PersonalFaceCaptureQualityAssessment.Waiting;
-    private PersonalFaceMotionModel _currentPersonalFaceMotionModel = new();
-    private PersonalFaceCorpusReadiness _currentPersonalFaceCorpusReadiness = new();
-    private PersonalFaceCollectionAudit _currentPersonalFaceCollectionAudit = new();
-    private MeasurementAvatarCapturePlan? _currentMeasurementAvatarCapturePlan;
+    private FaceFrameGeometry _currentFaceFrameGeometry = FaceFrameGeometry.None;
+    private ThreeDdfaOnnxSidecarResponse _currentThreeDdfaOnnxResponse = ThreeDdfaOnnxSidecarResponse.Waiting;
+    private AvatarCaptureQualityAssessment _currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
+    private AvatarProfileRegistry _avatarProfileRegistry = new();
+    private AvatarProfile _currentAvatarProfile = new()
+    {
+        Id = DefaultAvatarProfileId,
+        DisplayName = DefaultAvatarProfileDisplayName,
+        DataFolderName = ""
+    };
     private DateTime? _lowMotionStartedAt;
     private DateTime? _eyeCueStartedAt;
     private DateTime? _jawCueStartedAt;
@@ -153,27 +152,21 @@ public partial class MainWindow : Window
     private string _episodeStartSnapshot = "";
     private string _activeEventFolder = "";
     private string _activeEventVideo = "";
-    private string _personalFaceModelPath = "";
-    private string _personalFaceMotionModelPath = "";
-    private string _personalFaceCorpusReadinessPath = "";
-    private string _personalFaceCollectionAuditPath = "";
-    private string _measurementFacePreviewPath = "";
-    private string _measurementAvatarTrainingPackagePath = "";
-    private string _measurementAvatarCapturePlanPath = "";
-    private string _measurementAvatarSystemDashboardPath = "";
+    private string _avatarSystemDashboardPath = "";
+    private string _avatarModelHtmlPath = "";
     private string _lastGoodFeatureMeshJsonPath = "";
     private string _lastGoodFeatureMeshHtmlPath = "";
-    private string _personalFaceMeasurementJournalPath = "";
+    private string _lastGoodThreeDdfaJsonPath = "";
+    private string _lastGoodThreeDdfaHtmlPath = "";
     private DateTime? _alertBaselineSavedAtUtc;
     private string _alertBaselineCameraName = "";
     private string _alertBaselineModeLabel = "";
-    private long _personalFaceMeasurementJournalSizeBytes;
     private List<string> _activeTriggerReasons = [];
     private BitmapSource? _pendingPreviewFrame;
     private BitmapSource? _pendingFaceFeatureDetectionFrame;
     private TextureNativeFrameLease? _pendingDirectX12AnalysisFrame;
-    private PersonalFaceReportSnapshot? _pendingPersonalFaceReportSnapshot;
-    private Task? _personalFaceReportWriterTask;
+    private AvatarReportSnapshot? _pendingAvatarReportSnapshot;
+    private Task? _avatarReportWriterTask;
     private Direct3D12PreviewHost? _directX12PreviewHost;
     private Dx12Camera? _directX12NativeCamera;
     private double _episodeMotionSum;
@@ -183,16 +176,15 @@ public partial class MainWindow : Window
     private DateTime _lastPreviewFrameAcceptedAt = DateTime.MinValue;
     private DateTime _lastDirectX12DiagnosticsAtUtc = DateTime.MinValue;
     private DateTime _lastDirectX12AnalysisFrameAtUtc = DateTime.MinValue;
-    private DateTime _lastPersonalFaceModelSavedAtUtc = DateTime.MinValue;
+    private DateTime _lastAvatarReportSavedAtUtc = DateTime.MinValue;
     private DateTime _lastTrackingOverlayUpdateAtUtc = DateTime.MinValue;
     private DateTime _previewReplacementWindowStartedAtUtc = DateTime.MinValue;
     private string _lastTrackingOverlayState = "";
     private string _lastTrackingOverlayMetrics = "";
     private string _lastTrackingOverlayTrigger = "";
     private string _lastTrackingOverlayAccentColor = "";
-    private string _avatarHistoricalDataAuditSummary = "";
-    private string _avatarTrackingAuditHoldSummary = "";
     private string _avatarRecentMeshStabilitySummary = "";
+    private string _avatarCaptureGateReason = "waiting for face landmarks";
     private string _trackingFidelityConfigurationStatus = "";
     private string _lastGoodFeatureMeshStatus = "last good feature mesh waiting";
     private LastGoodFeatureMeshStabilityReport _lastGoodFeatureMeshStability = new();
@@ -209,8 +201,7 @@ public partial class MainWindow : Window
     private int _uiFramePending;
     private int _previewWarningPending;
     private int _faceFeatureDetectionPending;
-    private bool _avatarHistoricalDataSuspect;
-    private bool _avatarTrackingAuditHold;
+    private int _threeDdfaOnnxReconstructionPending;
     private bool _avatarRecentMeshStabilityHold;
     private long _directX12FrameNumber;
     private int _directX12AnalysisWorkerQueued;
@@ -218,6 +209,7 @@ public partial class MainWindow : Window
     private bool _sleepEventWatchActive;
     private bool _symptomCaptureActive;
     private bool _avatarLearningRequested;
+    private bool _avatarCaptureGateAccepted;
     private bool _showLiveWireframePreview;
     private bool _isCameraEnabled;
     private bool _isUpdatingCameraToggle;
@@ -226,6 +218,7 @@ public partial class MainWindow : Window
     private bool _isLoadingCameraControls;
     private bool _isUpdatingCameraControlUi;
     private bool _isSnappingSlider;
+    private bool _isUpdatingAvatarProfileUi;
     private bool _isClosing;
     private bool _startupOptionsApplied;
     private FaceCueGuideLayout? _activeFaceCueLayout;
@@ -236,6 +229,7 @@ public partial class MainWindow : Window
     private DateTime _cameraHealthWindowStartedAtUtc = DateTime.MinValue;
     private DateTime _featureOverlayHealthWindowStartedAtUtc = DateTime.MinValue;
     private DateTime _lastGoodFeatureMeshCapturedAtUtc = DateTime.MinValue;
+    private DateTime _lastThreeDdfaOnnxRequestAtUtc = DateTime.MinValue;
 
     private static readonly IReadOnlyList<TrackingFidelityOption> TrackingFidelityOptions =
     [
@@ -266,15 +260,12 @@ public partial class MainWindow : Window
     public MainWindow(EpisodeMonitorStartupOptions startupOptions)
     {
         _startupOptions = startupOptions ?? EpisodeMonitorStartupOptions.Default;
+        _threeDdfaOnnxModelInfo = ThreeDdfaOnnxModelInfo.Load();
+        _threeDdfaOnnxEnvironment = ThreeDdfaOnnxSidecarEnvironment.Detect(_threeDdfaOnnxModelInfo);
+        _threeDdfaOnnxClient = new ThreeDdfaOnnxReconstructionClient(_threeDdfaOnnxEnvironment);
         InitializeComponent();
         _outputFolder = ResolveInitialOutputFolder(_startupOptions.OutputFolder);
-        SaveOutputFolderSetting(_outputFolder);
-        _currentPersonalFaceModelUpdate = new PersonalFaceModelUpdate(
-            false,
-            PersonalFaceModelRejectionKind.NoFace,
-            "waiting for face landmarks",
-            0d,
-            _personalFaceModelBuilder.CurrentModel);
+        ResetAvatarCaptureGate("waiting for face landmarks");
         _previewService.FrameAvailable += PreviewFrameAvailable;
         _previewService.CameraFrameAvailable += PreviewCameraFrameAvailable;
         _previewService.StatusChanged += PreviewStatusChanged;
@@ -286,6 +277,8 @@ public partial class MainWindow : Window
     {
         EnableDarkWindowFrame();
         EventGrid.ItemsSource = _events;
+        EnsureOutputFolderConfiguredForLaunch();
+        InitializeAvatarProfiles(promptForStartupUser: true);
         PruneOldEventData();
         LoadTodaysEventListFromOutputFolder();
         TrackingFidelityComboBox.ItemsSource = TrackingFidelityOptions;
@@ -296,7 +289,7 @@ public partial class MainWindow : Window
         UpdateSettingLabels();
         UpdateSleepEventWatchButtonState();
         LoadAlertBaselineFromOutputFolder(showStatus: false);
-        LoadPersonalFaceModelFromOutputFolder(showStatus: false);
+        PrepareAvatarCaptureFolder(showStatus: false);
         UpdateCalibrationGuard();
         UpdateAvatarLearningStatusUi();
         _calibrationGuardTimer.Start();
@@ -325,11 +318,264 @@ public partial class MainWindow : Window
         UpdateAvatarLearningStatusUi();
         if (_startupOptions.EasyAvatarMode)
         {
-            var state = GetAvatarEasyModeState();
-            var status = $"Easy Avatar Mode launch: {state.Title}. {state.Detail}";
+            var state = GetAvatarCaptureGuidanceState();
+            var status = $"Avatar capture guidance: {state.Title}. {state.Detail}";
             SetStatus(status);
             MonitorStatusText.Text = status;
         }
+    }
+
+    private void InitializeAvatarProfiles(bool promptForStartupUser)
+    {
+        _avatarProfileRegistry = _avatarProfileStore.Load(_outputFolder);
+        AvatarProfileComboBox.ItemsSource ??= _avatarProfiles;
+
+        if (promptForStartupUser)
+        {
+            var startupSelection = PromptForStartupAvatarProfile(_avatarProfileRegistry);
+            if (!string.IsNullOrWhiteSpace(startupSelection.NewDisplayName))
+            {
+                _avatarProfileStore.AddOrUpdateProfile(_outputFolder, _avatarProfileRegistry, startupSelection.NewDisplayName);
+            }
+            else if (!string.IsNullOrWhiteSpace(startupSelection.ProfileId))
+            {
+                _avatarProfileStore.SelectProfile(_outputFolder, _avatarProfileRegistry, startupSelection.ProfileId);
+            }
+        }
+
+        if (_avatarProfileRegistry.Profiles.Count == 0)
+        {
+            _avatarProfileStore.AddOrUpdateProfile(_outputFolder, _avatarProfileRegistry, DefaultAvatarProfileDisplayName);
+        }
+
+        RefreshAvatarProfileList();
+        var selected = FindSelectedAvatarProfile() ?? _avatarProfiles.FirstOrDefault();
+        if (selected is null)
+        {
+            return;
+        }
+
+        ApplyCurrentAvatarProfile(selected, loadModel: false, stopLearning: false);
+        ResetAvatarCaptureGate("waiting for face landmarks");
+    }
+
+    private AvatarStartupSelection PromptForStartupAvatarProfile(AvatarProfileRegistry registry)
+    {
+        var profiles = registry.Profiles.ToList();
+        var window = new Window
+        {
+            Title = "Choose Avatar User",
+            Owner = this,
+            Width = 430,
+            SizeToContent = SizeToContent.Height,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ResizeMode = ResizeMode.NoResize,
+            Background = new SolidColorBrush(Color.FromRgb(8, 13, 18)),
+            Foreground = Brushes.White
+        };
+
+        var panel = new StackPanel { Margin = new Thickness(18) };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Who is in front of the camera for avatar capture?",
+            FontSize = 18,
+            FontWeight = FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 0, 0, 8)
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Pick a remembered user, or type a new consenting user's name. Narcolepsy tracking still works either way.",
+            Foreground = new SolidColorBrush(Color.FromRgb(185, 215, 239)),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 0, 0, 14)
+        });
+
+        var combo = new ComboBox
+        {
+            ItemsSource = profiles,
+            DisplayMemberPath = nameof(AvatarProfile.DisplayName),
+            MinHeight = 34,
+            Style = TryFindResource(typeof(ComboBox)) as Style,
+            ItemContainerStyle = TryFindResource(typeof(ComboBoxItem)) as Style,
+            IsEnabled = profiles.Count > 0,
+            SelectedItem = profiles.FirstOrDefault(profile => string.Equals(profile.Id, registry.SelectedProfileId, StringComparison.OrdinalIgnoreCase))
+                ?? profiles.OrderByDescending(static profile => profile.LastSelectedAtUtc ?? DateTime.MinValue).FirstOrDefault()
+        };
+        panel.Children.Add(combo);
+
+        var nameBox = new TextBox
+        {
+            MinHeight = 34,
+            Margin = new Thickness(0, 10, 0, 0),
+            Style = TryFindResource(typeof(TextBox)) as Style
+        };
+        panel.Children.Add(nameBox);
+
+        var status = new TextBlock
+        {
+            Foreground = new SolidColorBrush(Color.FromRgb(255, 154, 154)),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 8, 0, 0)
+        };
+        panel.Children.Add(status);
+
+        var buttons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 16, 0, 0)
+        };
+        var continueButton = new Button
+        {
+            Content = "Continue",
+            MinWidth = 110,
+            Margin = new Thickness(8, 0, 0, 0),
+            Style = TryFindResource(typeof(Button)) as Style
+        };
+        var cancelButton = new Button
+        {
+            Content = "Use Selected",
+            MinWidth = 110,
+            Style = TryFindResource(typeof(Button)) as Style,
+            IsEnabled = profiles.Count > 0
+        };
+        buttons.Children.Add(cancelButton);
+        buttons.Children.Add(continueButton);
+        panel.Children.Add(buttons);
+        window.Content = panel;
+
+        AvatarStartupSelection selection = new("", "");
+        continueButton.Click += (_, _) =>
+        {
+            var typedName = nameBox.Text.Trim();
+            if (!string.IsNullOrWhiteSpace(typedName))
+            {
+                selection = new AvatarStartupSelection("", typedName);
+                window.DialogResult = true;
+                return;
+            }
+
+            if (combo.SelectedItem is AvatarProfile profile)
+            {
+                selection = new AvatarStartupSelection(profile.Id, "");
+                window.DialogResult = true;
+                return;
+            }
+
+            status.Text = "Type the user's name before continuing.";
+        };
+        cancelButton.Click += (_, _) =>
+        {
+            if (combo.SelectedItem is AvatarProfile profile)
+            {
+                selection = new AvatarStartupSelection(profile.Id, "");
+                window.DialogResult = true;
+            }
+        };
+
+        var result = window.ShowDialog();
+        if (result == true)
+        {
+            return selection;
+        }
+
+        var fallback = profiles.FirstOrDefault(profile => string.Equals(profile.Id, registry.SelectedProfileId, StringComparison.OrdinalIgnoreCase))
+            ?? profiles.FirstOrDefault();
+        return fallback is null
+            ? new AvatarStartupSelection("", DefaultAvatarProfileDisplayName)
+            : new AvatarStartupSelection(fallback.Id, "");
+    }
+
+    private void RefreshAvatarProfileList()
+    {
+        _isUpdatingAvatarProfileUi = true;
+        try
+        {
+            _avatarProfiles.Clear();
+            foreach (var profile in _avatarProfileRegistry.Profiles.OrderBy(static profile => profile.DisplayName, StringComparer.OrdinalIgnoreCase))
+            {
+                _avatarProfiles.Add(profile);
+            }
+        }
+        finally
+        {
+            _isUpdatingAvatarProfileUi = false;
+        }
+    }
+
+    private AvatarProfile? FindSelectedAvatarProfile()
+    {
+        return _avatarProfiles.FirstOrDefault(profile =>
+                string.Equals(profile.Id, _avatarProfileRegistry.SelectedProfileId, StringComparison.OrdinalIgnoreCase))
+            ?? _avatarProfiles.OrderByDescending(static profile => profile.LastSelectedAtUtc ?? DateTime.MinValue).FirstOrDefault();
+    }
+
+    private void ApplyCurrentAvatarProfile(AvatarProfile profile, bool loadModel, bool stopLearning)
+    {
+        _currentAvatarProfile = profile;
+        if (stopLearning)
+        {
+            _avatarLearningRequested = false;
+        }
+
+        _isUpdatingAvatarProfileUi = true;
+        try
+        {
+            AvatarProfileComboBox.SelectedItem = _avatarProfiles.FirstOrDefault(item =>
+                string.Equals(item.Id, profile.Id, StringComparison.OrdinalIgnoreCase));
+            AvatarProfileNameTextBox.Text = "";
+            var displayName = CurrentAvatarProfileDisplayName;
+            AvatarSubjectCheckBox.Content = $"This is {displayName} - allow avatar capture";
+            AvatarSubjectCheckBox.ToolTip = $"Turn this on only when {displayName} is in front of the camera.";
+            AvatarProfileStatusText.Text = $"Selected user: {displayName}. Data folder: {GetAvatarDataFolder()}";
+        }
+        finally
+        {
+            _isUpdatingAvatarProfileUi = false;
+        }
+
+        _avatarProfileStore.SelectProfile(_outputFolder, _avatarProfileRegistry, profile.Id);
+        if (loadModel)
+        {
+            AvatarSubjectCheckBox.IsChecked = false;
+            ResetAvatarRuntimeForProfile("selected avatar user changed; confirm the subject before avatar capture");
+            PrepareAvatarCaptureFolder(showStatus: true);
+        }
+
+        UpdateAvatarLearningStatusUi();
+    }
+
+    private string CurrentAvatarProfileId => string.IsNullOrWhiteSpace(_currentAvatarProfile.Id)
+        ? DefaultAvatarProfileId
+        : _currentAvatarProfile.Id;
+
+    private string CurrentAvatarProfileDisplayName => string.IsNullOrWhiteSpace(_currentAvatarProfile.DisplayName)
+        ? DefaultAvatarProfileDisplayName
+        : _currentAvatarProfile.DisplayName;
+
+    private void ResetAvatarCaptureGate(string reason, bool accepted = false)
+    {
+        _avatarCaptureGateAccepted = accepted;
+        _avatarCaptureGateReason = string.IsNullOrWhiteSpace(reason) ? "waiting for face landmarks" : reason;
+    }
+
+    private void ResetAvatarRuntimeForProfile(string reason)
+    {
+        ResetAvatarCaptureGate(reason);
+        _currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
+        _avatarSystemDashboardPath = "";
+        _avatarModelHtmlPath = "";
+        _lastGoodFeatureMeshJsonPath = "";
+        _lastGoodFeatureMeshHtmlPath = "";
+        _lastGoodThreeDdfaJsonPath = "";
+        _lastGoodThreeDdfaHtmlPath = "";
+        _lastGoodFeatureMeshSamples.Clear();
+        _lastGoodThreeDdfaSamples.Clear();
+        RefreshLastGoodFeatureMeshStabilityAudit();
+        _lastGoodFeatureMeshStatus = "last good feature mesh waiting";
+        _avatarRecentMeshStabilityHold = false;
+        _avatarRecentMeshStabilitySummary = "";
     }
 
     private void PruneOldEventData()
@@ -359,31 +605,14 @@ public partial class MainWindow : Window
         _calibrationGuardTimer.Stop();
         _previewService.CameraFrameAvailable -= PreviewCameraFrameAvailable;
         SaveAlertBaselineToOutputFolder();
-        SavePersonalFaceModelOnClose();
         lock (_faceLandmarkTrackerLock)
         {
             _faceLandmarkTracker.Dispose();
         }
+        _threeDdfaOnnxClient.Dispose();
         DisposeDirectX12PreviewHost();
         _eventRecorder.Dispose();
         _previewService.Dispose();
-    }
-
-    private void SavePersonalFaceModelOnClose()
-    {
-        try
-        {
-            if (_currentPersonalFaceModelUpdate.Model.AcceptedSamples > 0)
-            {
-                var folder = GetPersonalFaceModelFolder();
-                _personalFaceModelPath = _personalFaceModelStore.Write(folder, _currentPersonalFaceModelUpdate.Model);
-                _personalFaceMeasurementJournalSizeBytes = PersonalFaceMeasurementJournal.GetMeasurementsSizeBytes(folder);
-            }
-        }
-        catch
-        {
-            // Closing should not be blocked by a final best-effort model save.
-        }
     }
 
     private async void RefreshCamerasClicked(object sender, RoutedEventArgs e)
@@ -856,7 +1085,7 @@ public partial class MainWindow : Window
         }
         else if (_featureOverlayFramesPerSecond > 0d && _featureOverlayFramesPerSecond < featureTarget * 0.45d)
         {
-            health = _personalFaceReportWriterTask is { IsCompleted: false }
+            health = _avatarReportWriterTask is { IsCompleted: false }
                 ? "feature overlay low while report writer is active"
                 : "feature overlay rate low";
         }
@@ -1823,32 +2052,56 @@ public partial class MainWindow : Window
         UpdateCalibrationGuard();
     }
 
-    private void PersonalModelSubjectChanged(object sender, RoutedEventArgs e)
+    private void AvatarProfileSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded)
+        if (!IsLoaded || _isUpdatingAvatarProfileUi || AvatarProfileComboBox.SelectedItem is not AvatarProfile profile)
         {
             return;
         }
 
-        if (PersonalModelSubjectCheckBox.IsChecked == true)
+        ApplyCurrentAvatarProfile(profile, loadModel: true, stopLearning: true);
+        SetStatus($"Avatar user switched to {CurrentAvatarProfileDisplayName}. Confirm the subject before starting avatar capture.");
+    }
+
+    private void AddAvatarProfileClicked(object sender, RoutedEventArgs e)
+    {
+        var displayName = AvatarProfileNameTextBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(displayName))
         {
-            _currentPersonalFaceModelUpdate = new PersonalFaceModelUpdate(
-                false,
-                PersonalFaceModelRejectionKind.NoFace,
-                "subject confirmed; waiting for high-confidence face measurements",
-                0d,
-                _personalFaceModelBuilder.CurrentModel);
-            SetStatus("Chris confirmed for Avatar System learning.");
+            SetStatus("Type the avatar user's name before adding a profile.");
+            return;
+        }
+
+        try
+        {
+            var profile = _avatarProfileStore.AddOrUpdateProfile(_outputFolder, _avatarProfileRegistry, displayName);
+            RefreshAvatarProfileList();
+            ApplyCurrentAvatarProfile(profile, loadModel: true, stopLearning: true);
+            SetStatus($"Avatar user {profile.DisplayName} is selected. Confirm the subject before starting avatar capture.");
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Could not add avatar user: {ex.Message}");
+        }
+    }
+
+    private void AvatarSubjectChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsLoaded || _isUpdatingAvatarProfileUi)
+        {
+            return;
+        }
+
+        var displayName = CurrentAvatarProfileDisplayName;
+        if (AvatarSubjectCheckBox.IsChecked == true)
+        {
+            ResetAvatarCaptureGate("subject confirmed; waiting for high-confidence face tracking");
+            SetStatus($"{displayName} confirmed for Avatar System capture.");
         }
         else
         {
-            _currentPersonalFaceModelUpdate = new PersonalFaceModelUpdate(
-                false,
-                PersonalFaceModelRejectionKind.SubjectNotConfirmed,
-                "subject not confirmed; personal model collection paused",
-                0d,
-                _personalFaceModelBuilder.CurrentModel);
-            SetStatus("Avatar System learning paused until Chris is confirmed.");
+            ResetAvatarCaptureGate("subject not confirmed; avatar capture paused");
+            SetStatus($"Avatar System capture paused until {displayName} is confirmed.");
         }
 
         UpdateAvatarLearningStatusUi();
@@ -1859,8 +2112,8 @@ public partial class MainWindow : Window
         _avatarLearningRequested = !_avatarLearningRequested;
         UpdateAvatarLearningStatusUi();
         SetStatus(_avatarLearningRequested
-            ? "Avatar System learning started. It can learn usual face range/motion during episodes, but alert-baseline calibration remains protected."
-            : "Avatar System learning stopped.");
+            ? "Avatar capture started. 3DDFA owns dense avatar reconstruction; MediaPipe eye/jaw/brow tracking stays live for overlays and narcolepsy cues."
+            : "Avatar capture stopped.");
     }
 
     private void UpdateAvatarLearningStatusUi()
@@ -1876,8 +2129,8 @@ public partial class MainWindow : Window
             _avatarLearningRequested,
             AvatarLearningStartButtonText,
             AvatarLearningStopButtonText,
-            "Starts measurement-only learning for the Avatar System. Event recording is separate.",
-            "Stops measurement-only learning for the Avatar System. Event recording is separate.");
+            "Starts 3DDFA avatar capture. Event recording is separate.",
+            "Stops 3DDFA avatar capture. Event recording is separate.");
         AvatarLearningStateText.Text = state.Title;
         AvatarLearningStatusText.Text = state.Detail;
         AvatarLearningIndicator.Background = new SolidColorBrush(state.Accent);
@@ -1885,7 +2138,97 @@ public partial class MainWindow : Window
         var trackingSanity = GetAvatarTrackingSanityState();
         AvatarTrackingSanityText.Text = trackingSanity.Detail;
         AvatarTrackingSanityText.Foreground = new SolidColorBrush(trackingSanity.Accent);
-        UpdateAvatarEasyModeUi();
+        var reconstructionLane = CreateFaceReconstructionLaneStatus();
+        AvatarReconstructionLaneText.Text = reconstructionLane.TrustDecision;
+        AvatarReconstructionLaneText.Foreground = new SolidColorBrush(ColorForReconstructionLane(reconstructionLane));
+        UpdateAvatarCaptureGuidanceUi();
+    }
+
+    private FaceReconstructionLaneStatus CreateFaceReconstructionLaneStatus()
+    {
+        var response = _currentThreeDdfaOnnxResponse;
+        var pending = Interlocked.CompareExchange(ref _threeDdfaOnnxReconstructionPending, 0, 0) == 1;
+        var canRun = _threeDdfaOnnxEnvironment.IsReady;
+        var reconstructionStatus = canRun
+            ? pending
+                ? "3DDFA/ONNX reconstructing latest avatar frame"
+                : !string.IsNullOrWhiteSpace(response.Status) ? response.Status : "3DDFA/ONNX ready; waiting for avatar frame"
+            : _threeDdfaOnnxEnvironment.Status;
+        var fastStatus = _faceLandmarkTracker.IsAvailable
+            ? _faceLandmarkTracker.LastBackendStatus
+            : "fast tracking lane unavailable";
+        var trustLevel = response.Ok && response.HasFace
+            ? "cross-checked"
+            : canRun ? "3DDFA-ready" : "measurement-only";
+        var trustDecision = response.Ok && response.HasFace
+            ? $"Avatar reconstruction: 3DDFA lock {response.ReconstructionConfidencePercent:0}% | A/B/C {response.Pose.ARotationAroundXDegrees:0.#}/{response.Pose.BRotationAroundYDegrees:0.#}/{response.Pose.CRotationAroundZDegrees:0.#} deg | dense {response.DenseVertexCount} vertices."
+            : canRun
+                ? $"Avatar reconstruction: {reconstructionStatus}. MediaPipe remains live tracking."
+                : $"Avatar reconstruction: waiting for 3DDFA/ONNX install. MediaPipe remains live tracking. {_threeDdfaOnnxEnvironment.Status}";
+
+        var warnings = new List<string>();
+        if (!canRun)
+        {
+            warnings.Add("3DDFA/ONNX avatar reconstruction is not active yet; avatar output remains measurement-only.");
+        }
+
+        warnings.AddRange(response.Warnings);
+        return new FaceReconstructionLaneStatus
+        {
+            CreatedAtUtc = DateTime.UtcNow,
+            FastTrackingAvailable = _faceLandmarkTracker.IsAvailable,
+            FastTrackingHasDenseFace = _currentFaceLandmarkFrame.HasDenseMesh,
+            FastTrackingStatus = string.IsNullOrWhiteSpace(fastStatus) ? "fast tracking waiting" : fastStatus,
+            AvatarReconstructionManifestPresent = _threeDdfaOnnxModelInfo.ManifestExists,
+            AvatarReconstructionModelPresent = _threeDdfaOnnxModelInfo.IsReady,
+            AvatarReconstructionCanRunInference = canRun,
+            AvatarReconstructionStatus = reconstructionStatus,
+            AvatarReconstructionRuntime = _threeDdfaOnnxModelInfo.Runtime,
+            AvatarReconstructionModelDirectory = _threeDdfaOnnxModelInfo.ModelDirectory,
+            AvatarReconstructionManifestPath = _threeDdfaOnnxModelInfo.ManifestPath,
+            AvatarReconstructionModelFiles = _threeDdfaOnnxModelInfo.ModelFiles,
+            AvatarReconstructionExpectedOutputs = _threeDdfaOnnxModelInfo.ExpectedOutputs,
+            TrustLevel = trustLevel,
+            TrustDecision = trustDecision,
+            LearningImpact = canRun
+                ? "3DDFA/ONNX runs asynchronously for avatar reconstruction trust and does not block narcolepsy tracking."
+                : "Narcolepsy tracking keeps using MediaPipe/OpenCV. Avatar reconstruction waits for the 3DDFA/ONNX bundle.",
+            Warnings = warnings
+        };
+    }
+
+    private bool HasStrongThreeDdfaPoseLock()
+    {
+        var response = _currentThreeDdfaOnnxResponse;
+        return response.Ok
+            && response.HasFace
+            && response.DenseVertexCount >= 30000
+            && response.ReconstructionConfidencePercent >= 70d;
+    }
+
+    private static bool IsLegacyMissingBRotationFinding(string? text)
+    {
+        return !string.IsNullOrWhiteSpace(text)
+            && (text.Contains("C rotation changes but no B rotation changes", StringComparison.OrdinalIgnoreCase)
+                || text.Contains("head A/B rotations are not moving", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private string FormatThreeDdfaPoseCrossCheck()
+    {
+        var response = _currentThreeDdfaOnnxResponse;
+        return $"3DDFA pose cross-check strong: A/B/C {response.Pose.ARotationAroundXDegrees:0.#}/{response.Pose.BRotationAroundYDegrees:0.#}/{response.Pose.CRotationAroundZDegrees:0.#} deg, dense {response.DenseVertexCount} vertices.";
+    }
+
+    private static Color ColorForReconstructionLane(FaceReconstructionLaneStatus lane)
+    {
+        if (lane.AvatarReconstructionCanRunInference && lane.TrustLevel == "cross-checked")
+        {
+            return Color.FromRgb(128, 224, 164);
+        }
+
+        return lane.AvatarReconstructionCanRunInference
+            ? Color.FromRgb(255, 210, 122)
+            : Color.FromRgb(185, 215, 239);
     }
 
     private static void ApplyStartStopButtonState(
@@ -1905,13 +2248,13 @@ public partial class MainWindow : Window
 
     private AvatarLearningState GetAvatarLearningState()
     {
-        var subjectConfirmed = PersonalModelSubjectCheckBox.IsChecked == true;
+        var subjectConfirmed = AvatarSubjectCheckBox.IsChecked == true;
         if (!subjectConfirmed)
         {
             return new AvatarLearningState(
                 false,
-                "Avatar learning stopped",
-                "Not learning: check 'This is Chris' only when you are in front of the camera.",
+                "Avatar capture stopped",
+                $"Not capturing: check 'This is {CurrentAvatarProfileDisplayName}' only when that person is in front of the camera.",
                 Color.FromRgb(89, 97, 107));
         }
 
@@ -1919,44 +2262,17 @@ public partial class MainWindow : Window
         {
             return new AvatarLearningState(
                 false,
-                "Avatar learning stopped",
-                "Not learning: click Start Avatar Learning when Chris is present and you want measurement-only face learning.",
+                "Avatar capture stopped",
+                $"Not capturing: click Start Avatar Capture when {CurrentAvatarProfileDisplayName} is present and you want 3DDFA avatar reconstruction samples.",
                 Color.FromRgb(89, 97, 107));
-        }
-
-        if (_avatarHistoricalDataSuspect)
-        {
-            return new AvatarLearningState(
-                false,
-                "Avatar data needs rebuild",
-                $"{_avatarHistoricalDataAuditSummary} Click Rebuild Avatar Data before collecting more measurements.",
-                Color.FromRgb(215, 165, 58));
-        }
-
-        if (_avatarTrackingAuditHold)
-        {
-            return new AvatarLearningState(
-                false,
-                "Avatar learning paused for tracking review",
-                $"{_avatarTrackingAuditHoldSummary} Review the overlay and Face Preview, then Rebuild Avatar Data if the face features were sliding instead of rotating with the head.",
-                Color.FromRgb(215, 165, 58));
-        }
-
-        if (_avatarRecentMeshStabilityHold)
-        {
-            return new AvatarLearningState(
-                false,
-                "Avatar learning paused for head-turn review",
-                $"{_avatarRecentMeshStabilitySummary} Review the Head-lock wireframe while slowly looking left and right.",
-                Color.FromRgb(215, 165, 58));
         }
 
         if (!_isCameraEnabled || _latestFrame is null)
         {
             return new AvatarLearningState(
                 false,
-                "Avatar learning waiting",
-                "Not learning yet: turn the camera on and wait for the face tracker to lock.",
+                "Avatar capture waiting",
+                "Not capturing yet: turn the camera on and wait for the face tracker to lock.",
                 Color.FromRgb(215, 165, 58));
         }
 
@@ -1964,219 +2280,89 @@ public partial class MainWindow : Window
         {
             return new AvatarLearningState(
                 false,
-                "Avatar learning waiting",
-                "Not learning yet: keep your full face visible until the eye and mouth overlay locks on.",
+                "Avatar capture waiting",
+                "Not capturing yet: keep your full face visible until the eye and mouth overlay locks on.",
                 Color.FromRgb(215, 165, 58));
         }
 
-        if (_currentPersonalFaceModelUpdate.Accepted && _currentPersonalFaceCaptureQuality.CanCollectMeasurements)
+        if (_currentAvatarCaptureQuality.CanCollectMeasurements)
         {
-            var eventNote = _activeEpisodeStartedAt is not null
-                ? " Event is active, so this is face range/motion data, not the alert baseline."
-                : "";
-            var title = _activeEpisodeStartedAt is not null
-                || _currentPersonalFaceModelUpdate.Reason.Contains("event-like", StringComparison.OrdinalIgnoreCase)
-                    ? "Learning face range/motion"
-                    : "Learning face measurements";
+            var pending = Interlocked.CompareExchange(ref _threeDdfaOnnxReconstructionPending, 0, 0) == 1;
+            var response = _currentThreeDdfaOnnxResponse;
+            var reconstruction = response.Ok && response.HasFace
+                ? $"3DDFA_V2 ONNX lock {response.ReconstructionConfidencePercent:0}% with {response.DenseVertexCount:n0} dense vertices; A/B/C {response.Pose.ARotationAroundXDegrees:0.#}/{response.Pose.BRotationAroundYDegrees:0.#}/{response.Pose.CRotationAroundZDegrees:0.#} deg."
+                : pending
+                    ? "3DDFA_V2 ONNX is reconstructing the latest frame."
+                    : _threeDdfaOnnxEnvironment.IsReady
+                        ? "3DDFA_V2 ONNX is ready and waiting for the next capture frame."
+                        : $"3DDFA_V2 ONNX is not ready: {_threeDdfaOnnxEnvironment.Status}";
             return new AvatarLearningState(
-                true,
-                title,
-                $"Learning: {_currentPersonalFaceModelUpdate.Reason}; accepted {_currentPersonalFaceModelUpdate.Model.AcceptedSamples} samples; quality {_currentPersonalFaceCaptureQuality.ScorePercent:0}%.{eventNote}",
-                Color.FromRgb(74, 163, 107));
+                _threeDdfaOnnxEnvironment.IsReady,
+                _threeDdfaOnnxEnvironment.IsReady ? "Capturing 3D avatar data" : "Avatar capture waiting",
+                $"{reconstruction} MediaPipe eye/jaw/brow tracking stays live for overlays and narcolepsy cues.",
+                _threeDdfaOnnxEnvironment.IsReady ? Color.FromRgb(74, 163, 107) : Color.FromRgb(215, 165, 58));
         }
 
-        var correction = _currentPersonalFaceCaptureQuality.Suggestions.FirstOrDefault()
-            ?? _currentPersonalFaceModelUpdate.Reason
-            ?? _currentPersonalFaceCaptureQuality.PrimaryReason;
-        if (string.IsNullOrWhiteSpace(correction))
-        {
-            correction = "Improve face lock, eye visibility, mouth visibility, lighting, or camera mode.";
-        }
-
+        var captureFix = _currentAvatarCaptureQuality.Suggestions.FirstOrDefault()
+            ?? _currentAvatarCaptureQuality.PrimaryReason
+            ?? "Improve face lock, eye visibility, mouth visibility, lighting, or camera mode.";
         return new AvatarLearningState(
             false,
-            "Avatar learning waiting",
-            $"Not learning: {_currentPersonalFaceCaptureQuality.PrimaryReason}. Fix: {correction}",
+            "Avatar capture waiting",
+            $"Not capturing: {_currentAvatarCaptureQuality.PrimaryReason}. Fix: {captureFix}",
             Color.FromRgb(215, 165, 58));
     }
 
     private AvatarTrackingSanityState GetAvatarTrackingSanityState()
     {
-        var readiness = _currentPersonalFaceCorpusReadiness;
-        var model = _currentPersonalFaceModelUpdate.Model;
-        if (_avatarRecentMeshStabilityHold)
+        if (HasStrongThreeDdfaPoseLock())
         {
             return new AvatarTrackingSanityState(
-                $"Head-turn sanity hold: {_avatarRecentMeshStabilitySummary}",
-                Color.FromRgb(255, 210, 122));
+                $"Tracking sanity: 3DDFA_V2 ONNX owns avatar pose/depth. MediaPipe eye/jaw/brow tracking remains active for overlays and narcolepsy cues. {FormatThreeDdfaPoseCrossCheck()}",
+                Color.FromRgb(128, 224, 164));
         }
 
-        if (_lastGoodFeatureMeshStability.HeadLockedSampleCount >= LastGoodFeatureMeshStabilityMinimumSamplesToHold
-            && _lastGoodFeatureMeshStability.YawHealthPercent is > 0d and < 82d)
-        {
-            return new AvatarTrackingSanityState(
-                $"Recent B head-turn lock warming: {_lastGoodFeatureMeshStability.YawStatus}; B range {_lastGoodFeatureMeshStability.YawRangeDegrees:0.#} deg; worst drift {_lastGoodFeatureMeshStability.YawWorstFeatureDriftPercent:0.#}%.",
-                Color.FromRgb(255, 210, 122));
-        }
-
-        if (readiness.AcceptedBaselineSamples <= 0 && model.AcceptedSamples <= 0)
-        {
-            return new AvatarTrackingSanityState(
-                "Tracking sanity: waiting for enough accepted measurements to audit head pose and feature anchoring.",
-                Color.FromRgb(185, 215, 239));
-        }
-
-        if (readiness.AcceptedBaselineSamples < PersonalFaceDataAuditMinimumSamplesToBlock)
-        {
-            return new AvatarTrackingSanityState(
-                $"Tracking sanity: warming ({readiness.AcceptedBaselineSamples}/{PersonalFaceDataAuditMinimumSamplesToBlock} audit samples). Keep collecting varied face positions.",
-                Color.FromRgb(185, 215, 239));
-        }
-
-        if (readiness.DataAuditHealthPercent <= 0d)
-        {
-            return new AvatarTrackingSanityState(
-                "Tracking sanity: waiting for the data audit to calculate pose and feature anchoring health.",
-                Color.FromRgb(185, 215, 239));
-        }
-
-        var auditGate = PersonalFaceLearningAuditGate.Evaluate(readiness);
-        if (auditGate.HoldLearning)
-        {
-            return new AvatarTrackingSanityState(
-                $"Tracking sanity hold: {auditGate.Reason}",
-                Color.FromRgb(255, 210, 122));
-        }
-
-        var firstFinding = readiness.DataAuditFindings.FirstOrDefault();
-        if (readiness.PoseEstimationHealthPercent is > 0d and < 60d)
-        {
-            return new AvatarTrackingSanityState(
-                $"Tracking sanity needs review: pose {readiness.PoseEstimationHealthPercent:0.#}%. {firstFinding ?? "Turned-head data may not be separating head motion from feature motion."}",
-                Color.FromRgb(255, 210, 122));
-        }
-
-        if (readiness.FeatureAnchoringHealthPercent is > 0d and < 60d)
-        {
-            return new AvatarTrackingSanityState(
-                $"Tracking sanity needs review: feature anchoring {readiness.FeatureAnchoringHealthPercent:0.#}%. {firstFinding ?? "Eyes or mouth may be sliding relative to the head."}",
-                Color.FromRgb(255, 210, 122));
-        }
-
-        if (readiness.PoseBucketConsistency.ComparedPoseBucketCount > 0
-            && readiness.PoseBucketConsistencyHealthPercent is > 0d and < 70d)
-        {
-            return new AvatarTrackingSanityState(
-                $"Tracking sanity needs review: pose consistency {readiness.PoseBucketConsistencyHealthPercent:0.#}%. {firstFinding ?? "Turned-head buckets should not rewrite eye, mouth, or face proportions."}",
-                Color.FromRgb(255, 210, 122));
-        }
-
-        if (readiness.ApertureConsistencyHealthPercent is > 0d and < 70d)
-        {
-            return new AvatarTrackingSanityState(
-                $"Tracking sanity needs review: aperture consistency {readiness.ApertureConsistencyHealthPercent:0.#}%. {firstFinding ?? "Eye, mouth, or jaw opening should agree with dense blink and mouth evidence."}",
-                Color.FromRgb(255, 210, 122));
-        }
-
-        if (readiness.DataAuditHealthPercent is > 0d and < 75d)
-        {
-            return new AvatarTrackingSanityState(
-                $"Tracking sanity warming: data audit {readiness.DataAuditHealthPercent:0.#}%. {firstFinding ?? "Keep collecting varied pose, distance, and expression data."}",
-                Color.FromRgb(255, 210, 122));
-        }
-
-        return new AvatarTrackingSanityState(
-            $"Tracking sanity healthy: pose {readiness.PoseEstimationHealthPercent:0.#}%, anchoring {readiness.FeatureAnchoringHealthPercent:0.#}%, pose consistency {readiness.PoseBucketConsistencyHealthPercent:0.#}%, aperture {readiness.ApertureConsistencyHealthPercent:0.#}%, jaw scale {readiness.JawDroopScaleHealthPercent:0.#}%.",
-            Color.FromRgb(128, 224, 164));
+        var detail = _threeDdfaOnnxEnvironment.IsReady
+            ? "Tracking sanity: MediaPipe eye/jaw/brow tracking is live; waiting for a strong 3DDFA_V2 ONNX pose lock before trusting avatar pose/depth."
+            : $"Tracking sanity: MediaPipe eye/jaw/brow tracking is live; 3DDFA_V2 ONNX avatar reconstruction is waiting. {_threeDdfaOnnxEnvironment.Status}";
+        return new AvatarTrackingSanityState(detail, Color.FromRgb(185, 215, 239));
     }
 
-    private void AvatarEasyModeClicked(object sender, RoutedEventArgs e)
-    {
-        var state = GetAvatarEasyModeState();
-        if (!state.CanStartLearning)
-        {
-            if (_avatarHistoricalDataSuspect || _avatarTrackingAuditHold)
-            {
-                OpenAvatarSystemClicked(sender, e);
-            }
-            else
-            {
-                SetStatus($"{state.Title}: {state.Detail}");
-                MonitorStatusText.Text = state.Detail;
-            }
-
-            UpdateAvatarEasyModeUi();
-            return;
-        }
-
-        _avatarLearningRequested = true;
-        try
-        {
-            var folder = GetPersonalFaceModelFolder();
-            Directory.CreateDirectory(folder);
-            _measurementAvatarCapturePlanPath = Path.Combine(folder, MeasurementAvatarCapturePlanStore.HtmlFileName);
-            _measurementAvatarSystemDashboardPath = GetMeasurementAvatarSystemDashboardHtmlPath(folder);
-            QueuePersonalFaceReportSave(CreatePersonalFaceReportSnapshot(folder, _currentPersonalFaceModelUpdate.Model));
-        }
-        catch (Exception ex)
-        {
-            SetStatus($"Easy Avatar Mode report refresh paused: {ex.Message}");
-        }
-
-        UpdateAvatarLearningStatusUi();
-        state = GetAvatarEasyModeState();
-        var status = $"{state.Title}: {state.Detail}";
-        SetStatus(status);
-        MonitorStatusText.Text = status;
-    }
-
-    private void UpdateAvatarEasyModeUi()
+    private void UpdateAvatarCaptureGuidanceUi()
     {
         if (!IsLoaded)
         {
             return;
         }
 
-        var state = GetAvatarEasyModeState();
-        AvatarEasyModeTitleText.Text = state.Title;
-        AvatarEasyModeDetailText.Text = state.Detail;
-        AvatarEasyModeTitleText.Foreground = new SolidColorBrush(ColorForEasyModeSeverity(state.Severity));
-        AvatarEasyModeButton.Content = state.ActionText;
-        AvatarEasyModeButton.ToolTip = state.Detail;
-        AvatarEasyModeButton.Background = state.CanStartLearning ? StartActionButtonBackground : CreateFrozenBrush(0x20, 0x32, 0x43);
-        AvatarEasyModeButton.BorderBrush = state.CanStartLearning ? StartActionButtonBorder : CreateFrozenBrush(0x4a, 0x63, 0x7a);
-        AvatarEasyModeButton.Foreground = Brushes.White;
+        var state = GetAvatarCaptureGuidanceState();
+        AvatarCaptureGuidanceTitleText.Text = state.Title;
+        AvatarCaptureGuidanceDetailText.Text = state.Detail;
+        AvatarCaptureGuidanceTitleText.Foreground = new SolidColorBrush(ColorForAvatarCaptureGuidanceSeverity(state.Severity));
     }
 
-    private MeasurementAvatarEasyModeState GetAvatarEasyModeState()
+    private AvatarCaptureGuidanceState GetAvatarCaptureGuidanceState()
     {
-        var state = MeasurementAvatarEasyModeAdvisor.Create(new MeasurementAvatarEasyModeInput
+        var state = AvatarCaptureGuidanceAdvisor.Create(new AvatarCaptureGuidanceInput
         {
-            SubjectConfirmed = PersonalModelSubjectCheckBox.IsChecked == true,
+            SubjectConfirmed = AvatarSubjectCheckBox.IsChecked == true,
             AvatarLearningRequested = _avatarLearningRequested,
             CameraActive = _isCameraEnabled && _latestFrame is not null,
             FaceLocked = _currentFaceLandmarkFrame.HasFace && _currentFaceLandmarkMetrics.HasFace,
-            HistoricalDataSuspect = _avatarHistoricalDataSuspect,
-            HistoricalDataAuditSummary = _avatarHistoricalDataAuditSummary,
-            TrackingAuditHold = _avatarTrackingAuditHold || _avatarRecentMeshStabilityHold,
-            TrackingAuditHoldSummary = _avatarRecentMeshStabilityHold
-                ? _avatarRecentMeshStabilitySummary
-                : _avatarTrackingAuditHoldSummary,
-            CaptureQuality = _currentPersonalFaceCaptureQuality,
-            CapturePlan = _currentMeasurementAvatarCapturePlan,
-            CapturePlanHtmlPath = _measurementAvatarCapturePlanPath
+            TrackingAuditHold = _avatarRecentMeshStabilityHold,
+            TrackingAuditHoldSummary = _avatarRecentMeshStabilitySummary,
+            CaptureQuality = _currentAvatarCaptureQuality
         });
-        state.CapturePlanHtmlPath = _measurementAvatarCapturePlanPath;
         return state;
     }
 
-    private static Color ColorForEasyModeSeverity(string severity)
+    private static Color ColorForAvatarCaptureGuidanceSeverity(string severity)
     {
         return severity switch
         {
-            MeasurementAvatarEasyModeSeverity.Good => Color.FromRgb(128, 224, 164),
-            MeasurementAvatarEasyModeSeverity.Warning => Color.FromRgb(255, 210, 122),
-            MeasurementAvatarEasyModeSeverity.Blocked => Color.FromRgb(255, 154, 154),
+            AvatarCaptureGuidanceSeverity.Good => Color.FromRgb(128, 224, 164),
+            AvatarCaptureGuidanceSeverity.Warning => Color.FromRgb(255, 210, 122),
+            AvatarCaptureGuidanceSeverity.Blocked => Color.FromRgb(255, 154, 154),
             _ => Color.FromRgb(185, 215, 239)
         };
     }
@@ -2220,22 +2406,19 @@ public partial class MainWindow : Window
     {
         try
         {
-            var folder = GetPersonalFaceModelFolder();
+            var folder = GetAvatarDataFolder();
             Directory.CreateDirectory(folder);
-            var snapshot = CreatePersonalFaceReportSnapshot(folder, _currentPersonalFaceModelUpdate.Model);
-            QueuePersonalFaceReportSave(snapshot);
-            _personalFaceModelPath = Path.Combine(folder, _personalFaceModelStore.FileName);
-            _measurementFacePreviewPath = Path.Combine(folder, MeasurementFacePreviewStore.HtmlFileName);
-            _personalFaceMotionModelPath = Path.Combine(folder, _personalFaceMotionModelStore.FileName);
-            _measurementAvatarTrainingPackagePath = Path.Combine(folder, MeasurementAvatarTrainingPackageStore.HtmlFileName);
-            _measurementAvatarCapturePlanPath = Path.Combine(folder, MeasurementAvatarCapturePlanStore.HtmlFileName);
+            var snapshot = CreateAvatarReportSnapshot(folder);
+            QueueAvatarReportSave(snapshot);
             _lastGoodFeatureMeshHtmlPath = LastGoodFeatureMeshStore.GetHtmlPath(folder);
-            _measurementAvatarSystemDashboardPath = GetMeasurementAvatarSystemDashboardHtmlPath(folder);
-            EnsureAvatarSystemPlaceholder(_measurementAvatarSystemDashboardPath);
-            OpenLocalFile(_measurementAvatarSystemDashboardPath);
-            var status = _currentPersonalFaceModelUpdate.Model.AcceptedSamples > 0
-                ? $"Opened live Avatar System: {_measurementAvatarSystemDashboardPath}"
-                : "Opened live waiting Avatar System. Confirm Chris and start avatar learning to collect measurements.";
+            _lastGoodThreeDdfaHtmlPath = LastGoodThreeDdfaStore.GetHtmlPath(folder);
+            _avatarModelHtmlPath = AvatarModelStore.GetHtmlPath(folder);
+            _avatarSystemDashboardPath = GetAvatarSystemDashboardHtmlPath(folder);
+            EnsureAvatarSystemPlaceholder(_avatarSystemDashboardPath);
+            OpenLocalFile(_avatarSystemDashboardPath);
+            var status = _lastGoodFeatureMeshSamples.Count > 0 || _currentThreeDdfaOnnxResponse is { Ok: true, HasFace: true }
+                ? $"Opened live Avatar System: {_avatarSystemDashboardPath}"
+                : $"Opened live waiting Avatar System. Confirm {CurrentAvatarProfileDisplayName} and start avatar capture.";
             MonitorStatusText.Text = status;
             SetStatus(status);
         }
@@ -2251,30 +2434,98 @@ public partial class MainWindow : Window
     {
         try
         {
-            var folder = GetPersonalFaceModelFolder();
+            var folder = GetAvatarDataFolder();
             Directory.CreateDirectory(folder);
             var files = _lastGoodFeatureMeshStore.Write(
                 folder,
                 new LastGoodFeatureMeshReport
                 {
-                    SubjectId = PersonalFaceSubjectId,
-                    SubjectDisplayName = PersonalFaceSubjectDisplayName,
+                    SubjectId = CurrentAvatarProfileId,
+                    SubjectDisplayName = CurrentAvatarProfileDisplayName,
+                    AvatarModelProgressHtmlPath = AvatarModelStore.GetHtmlPath(folder),
+                    ReconstructionLane = CreateFaceReconstructionLaneStatus(),
                     Samples = _lastGoodFeatureMeshSamples.ToList()
                 });
             _lastGoodFeatureMeshJsonPath = files.JsonPath;
             _lastGoodFeatureMeshHtmlPath = files.HtmlPath;
             OpenLocalFile(files.HtmlPath);
             var status = _lastGoodFeatureMeshSamples.Count > 0
-                ? $"Opened Last 10 Good Features: {files.HtmlPath}"
-                : "Opened Last 10 Good Features. Confirm Chris and let the dense tracker get a good eye/mouth lock to populate it.";
+                ? $"Opened MediaPipe Last 5 Feature Locks: {files.HtmlPath}"
+                : $"Opened MediaPipe Last 5 Feature Locks. Confirm {CurrentAvatarProfileDisplayName} and let the fast tracker get a good eye/mouth lock to populate it.";
             SetStatus(status);
             MonitorStatusText.Text = status;
         }
         catch (Exception ex)
         {
-            var status = $"Could not open Last 10 Good Features: {ex.Message}";
+            var status = $"Could not open MediaPipe Last 5 Feature Locks: {ex.Message}";
             SetStatus(status);
             MonitorStatusText.Text = status;
+        }
+    }
+
+    private async void OpenLastGoodThreeDdfaClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var folder = GetAvatarDataFolder();
+            Directory.CreateDirectory(folder);
+            var report = new LastGoodThreeDdfaReport
+            {
+                SubjectId = CurrentAvatarProfileId,
+                SubjectDisplayName = CurrentAvatarProfileDisplayName,
+                AvatarModelProgressHtmlPath = AvatarModelStore.GetHtmlPath(folder),
+                ReconstructionLane = CreateFaceReconstructionLaneStatus(),
+                Samples = _lastGoodThreeDdfaSamples.ToList()
+            };
+            SetStatus("Writing 3DDFA Last 5 Dense Reconstructions...");
+            var files = await Task.Run(() => _lastGoodThreeDdfaStore.Write(folder, report));
+            if (_isClosing)
+            {
+                return;
+            }
+
+            _lastGoodThreeDdfaJsonPath = files.JsonPath;
+            _lastGoodThreeDdfaHtmlPath = files.HtmlPath;
+            OpenLocalFile(files.HtmlPath);
+            var status = _lastGoodThreeDdfaSamples.Count > 0
+                ? $"Opened 3DDFA Last 5 Dense Reconstructions: {files.HtmlPath}"
+                : $"Opened 3DDFA Last 5 Dense Reconstructions. Start Avatar Capture and wait for the 3DDFA lane to lock.";
+            SetStatus(status);
+            MonitorStatusText.Text = status;
+        }
+        catch (Exception ex)
+        {
+            var status = $"Could not open 3DDFA Last 5 Dense Reconstructions: {ex.Message}";
+            SetStatus(status);
+            MonitorStatusText.Text = status;
+        }
+    }
+
+    private async void OpenAvatarModelProgressClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var folder = GetAvatarDataFolder();
+            Directory.CreateDirectory(folder);
+            var snapshot = CreateAvatarReportSnapshot(folder);
+            SetStatus("Writing Avatar Model Progress...");
+            var result = await Task.Run(() => WriteAvatarReports(snapshot));
+            if (_isClosing)
+            {
+                return;
+            }
+
+            ApplyAvatarReportSaveResult(result);
+            OpenLocalFile(result.AvatarModelHtmlPath);
+            var status = $"Opened Avatar Model Progress: {result.AvatarModelHtmlPath}";
+            SetStatus(status);
+            MonitorStatusText.Text = status;
+        }
+        catch (Exception ex)
+        {
+            var status = $"Could not open Avatar Model Progress: {ex.Message}";
+            MonitorStatusText.Text = status;
+            SetStatus(status);
         }
     }
 
@@ -2282,7 +2533,7 @@ public partial class MainWindow : Window
     {
         var result = MessageBox.Show(
             this,
-            "Archive the current Avatar measurements and start a fresh model? The old files will be moved to an archive folder, not deleted.",
+            "Archive the current Avatar review/capture files and start fresh? The old files will be moved to an archive folder, not deleted.",
             "Rebuild Avatar Data?",
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning);
@@ -2291,7 +2542,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_personalFaceReportWriterTask is { IsCompleted: false })
+        if (_avatarReportWriterTask is { IsCompleted: false })
         {
             SetStatus("Avatar report save is still finishing. Try Rebuild Avatar Data again in a moment.");
             return;
@@ -2299,60 +2550,84 @@ public partial class MainWindow : Window
 
         try
         {
-            var folder = GetPersonalFaceModelFolder();
-            string archivePath = "";
-            if (Directory.Exists(folder))
-            {
-                var archiveRoot = Path.Combine(_outputFolder, PersonalFaceArchiveFolderName);
-                Directory.CreateDirectory(archiveRoot);
-                archivePath = CreateUniqueArchivePath(archiveRoot, DateTime.UtcNow);
-                Directory.Move(folder, archivePath);
-            }
+            var folder = GetAvatarDataFolder();
+            var archivePath = ArchiveCurrentAvatarProfileFolder(folder, DateTime.UtcNow);
 
             Directory.CreateDirectory(folder);
-            _personalFaceModelBuilder.Reset();
-            _currentPersonalFaceModelUpdate = new PersonalFaceModelUpdate(
-                false,
-                PersonalFaceModelRejectionKind.LearningStopped,
-                "avatar data rebuilt; learning resumes when Start Avatar Learning is active",
-                0d,
-                _personalFaceModelBuilder.CurrentModel);
-            _currentPersonalFaceCaptureQuality = PersonalFaceCaptureQualityAssessment.Waiting;
-            _currentPersonalFaceMotionModel = new PersonalFaceMotionModel();
-            _currentPersonalFaceCorpusReadiness = new PersonalFaceCorpusReadiness();
-            _currentPersonalFaceCollectionAudit = new PersonalFaceCollectionAudit();
-            _personalFaceCollectionAuditObservations.Clear();
-            _personalFaceMeasurementJournalSizeBytes = 0L;
-            _personalFaceModelPath = "";
-            _personalFaceMotionModelPath = "";
-            _personalFaceCorpusReadinessPath = "";
-            _personalFaceCollectionAuditPath = "";
-            _measurementFacePreviewPath = "";
-            _measurementAvatarTrainingPackagePath = "";
-            _measurementAvatarCapturePlanPath = "";
-            _measurementAvatarSystemDashboardPath = "";
-            _currentMeasurementAvatarCapturePlan = null;
+            ResetAvatarCaptureGate("avatar data rebuilt; capture resumes when Start Avatar Capture is active");
+            _currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
+            _avatarSystemDashboardPath = "";
+            _avatarModelHtmlPath = "";
             _lastGoodFeatureMeshJsonPath = "";
             _lastGoodFeatureMeshHtmlPath = "";
+            _lastGoodThreeDdfaJsonPath = "";
+            _lastGoodThreeDdfaHtmlPath = "";
             _lastGoodFeatureMeshSamples.Clear();
+            _lastGoodThreeDdfaSamples.Clear();
             RefreshLastGoodFeatureMeshStabilityAudit();
             _lastGoodFeatureMeshStatus = "last good feature mesh waiting";
-            _avatarHistoricalDataSuspect = false;
-            _avatarHistoricalDataAuditSummary = "";
             _avatarRecentMeshStabilityHold = false;
             _avatarRecentMeshStabilitySummary = "";
-            _avatarTrackingAuditHold = false;
-            _avatarTrackingAuditHoldSummary = "";
             _avatarLearningRequested = false;
             UpdateAvatarLearningStatusUi();
             SetStatus(string.IsNullOrWhiteSpace(archivePath)
-                ? "Avatar data reset. Start Avatar Learning to collect fresh measurements."
-                : $"Avatar data archived to {archivePath}. Start Avatar Learning to collect fresh measurements.");
+                ? "Avatar data reset. Start Avatar Capture to collect fresh 3DDFA samples."
+                : $"Avatar data archived to {archivePath}. Start Avatar Capture to collect fresh 3DDFA samples.");
         }
         catch (Exception ex)
         {
             SetStatus($"Could not rebuild Avatar data: {ex.Message}");
         }
+    }
+
+    private string ArchiveCurrentAvatarProfileFolder(string folder, DateTime utcNow)
+    {
+        if (!Directory.Exists(folder))
+        {
+            return "";
+        }
+
+        var archiveRoot = Path.Combine(_outputFolder, AvatarArchiveFolderName, CurrentAvatarProfileId);
+        Directory.CreateDirectory(archiveRoot);
+        var archivePath = CreateUniqueArchivePath(archiveRoot, utcNow);
+        var avatarRoot = _avatarProfileStore.GetRootFolder(_outputFolder);
+        if (!IsSameDirectory(folder, avatarRoot))
+        {
+            Directory.Move(folder, archivePath);
+            return archivePath;
+        }
+
+        Directory.CreateDirectory(archivePath);
+        foreach (var file in Directory.EnumerateFiles(folder))
+        {
+            var fileName = Path.GetFileName(file);
+            if (string.Equals(fileName, AvatarProfileStore.RegistryFileName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            File.Move(file, Path.Combine(archivePath, fileName));
+        }
+
+        foreach (var directory in Directory.EnumerateDirectories(folder))
+        {
+            var directoryName = Path.GetFileName(directory);
+            if (string.Equals(directoryName, AvatarProfileStore.PeopleFolderName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            Directory.Move(directory, Path.Combine(archivePath, directoryName));
+        }
+
+        return Directory.EnumerateFileSystemEntries(archivePath).Any() ? archivePath : "";
+    }
+
+    private static bool IsSameDirectory(string left, string right)
+    {
+        var normalizedLeft = Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var normalizedRight = Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase);
     }
 
     private void SymptomCaptureClicked(object sender, RoutedEventArgs e)
@@ -2691,12 +2966,12 @@ public partial class MainWindow : Window
                     : detection.ToLandmarkFrame(now);
                 _currentFaceLandmarkFrame = _faceLandmarkReconstructor.Update(rawLandmarkFrame);
                 _currentFaceLandmarkMetrics = _faceLandmarkMetricCalculator.Update(_currentFaceLandmarkFrame);
-                _currentHeadPoseEstimate = _headPoseEstimator.Estimate(new HeadPoseEstimatorInput
+                _currentFaceFrameGeometry = _faceFrameGeometryEstimator.Estimate(new FaceFrameGeometryEstimatorInput
                 {
                     Frame = _currentFaceLandmarkFrame,
                     FrameWidthPixels = _latestFrame?.PixelWidth,
                     FrameHeightPixels = _latestFrame?.PixelHeight,
-                    Calibration = GetCurrentHeadPoseCalibration()
+                    Calibration = GetCurrentFaceFrameGeometryCalibration()
                 });
                 _currentFaceLandmarkCueAnalysis = _faceLandmarkCueAnalyzer.Analyze(_currentFaceLandmarkMetrics);
                 _currentFaceLandmarkTrendAnalysis = _faceLandmarkTrendAnalyzer.Update(_currentFaceLandmarkMetrics);
@@ -2706,7 +2981,8 @@ public partial class MainWindow : Window
                     _currentFaceLandmarkMetrics);
                 TrackFeatureOverlayFrame(now);
                 TrackLastGoodFeatureMeshSample(now);
-                UpdatePersonalFaceModel(now);
+                QueueThreeDdfaOnnxReconstruction(_latestFrame, now);
+                UpdateAvatarCaptureState(now);
                 UpdateAlertBaselineCalibrationStatus();
             }
             else if (!HasUsableFaceFeatureLock(now))
@@ -2719,11 +2995,223 @@ public partial class MainWindow : Window
         }, DispatcherPriority.Background).Task;
     }
 
+    private void QueueThreeDdfaOnnxReconstruction(BitmapSource? bitmap, DateTime capturedAtUtc)
+    {
+        if (_isClosing
+            || bitmap is null
+            || !_threeDdfaOnnxEnvironment.IsReady
+            || AvatarSubjectCheckBox.IsChecked != true
+            || !_avatarLearningRequested
+            || !_currentFaceFeatureDetection.HasFace
+            || (capturedAtUtc - _lastThreeDdfaOnnxRequestAtUtc).TotalMilliseconds < 900d)
+        {
+            return;
+        }
+
+        _lastThreeDdfaOnnxRequestAtUtc = capturedAtUtc;
+        if (Interlocked.Exchange(ref _threeDdfaOnnxReconstructionPending, 1) != 0)
+        {
+            return;
+        }
+
+        var frame = bitmap.IsFrozen ? bitmap : bitmap.Clone();
+        if (!frame.IsFrozen && frame.CanFreeze)
+        {
+            frame.Freeze();
+        }
+
+        var faceBox = CreateThreeDdfaFaceBox(_currentFaceFeatureDetection);
+        _ = Task.Run(() => ProcessThreeDdfaOnnxReconstructionAsync(frame, capturedAtUtc, faceBox));
+    }
+
+    private async Task ProcessThreeDdfaOnnxReconstructionAsync(
+        BitmapSource bitmap,
+        DateTime capturedAtUtc,
+        ThreeDdfaOnnxSidecarFaceBox? faceBox)
+    {
+        ThreeDdfaOnnxSidecarResponse response;
+        LastGoodFeatureThreeDdfaSnapshot? snapshot = null;
+        try
+        {
+            response = _threeDdfaOnnxClient.Reconstruct(
+                bitmap,
+                capturedAtUtc,
+                faceBox,
+                returnDenseVertices: true,
+                denseSampleStride: 1);
+            snapshot = CreateThreeDdfaLastGoodSnapshot(response, capturedAtUtc);
+        }
+        catch (Exception ex)
+        {
+            response = new ThreeDdfaOnnxSidecarResponse
+            {
+                Ok = false,
+                Status = $"3DDFA/ONNX reconstruction failed: {ex.Message}",
+                TrustDecision = "3DDFA/ONNX failed; do not use this frame for avatar reconstruction trust."
+            };
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _threeDdfaOnnxReconstructionPending, 0);
+        }
+
+        await Dispatcher.InvokeAsync(() =>
+        {
+            if (_isClosing)
+            {
+                return;
+            }
+
+            _currentThreeDdfaOnnxResponse = response;
+            UpdateAvatarLearningStatusUi();
+            TrackLastGoodThreeDdfaSnapshot(snapshot);
+            UpdateTrackingFidelityHealthText();
+            if (_showLiveWireframePreview)
+            {
+                DrawLiveWireframePreview();
+            }
+        }, DispatcherPriority.Background);
+    }
+
+    private static ThreeDdfaOnnxSidecarFaceBox? CreateThreeDdfaFaceBox(FaceFeatureDetection detection)
+    {
+        if (!detection.HasFace || detection.FaceBox.Width <= 0d || detection.FaceBox.Height <= 0d)
+        {
+            return null;
+        }
+
+        return new ThreeDdfaOnnxSidecarFaceBox
+        {
+            Left = detection.FaceBox.Left,
+            Top = detection.FaceBox.Top,
+            Right = detection.FaceBox.Right,
+            Bottom = detection.FaceBox.Bottom,
+            Normalized = true,
+            Confidence = Math.Clamp(detection.TrackingConfidence, 0.01d, 1d)
+        };
+    }
+
+    private void TrackLastGoodThreeDdfaSnapshot(LastGoodFeatureThreeDdfaSnapshot? snapshot)
+    {
+        if (snapshot is null)
+        {
+            return;
+        }
+
+        var existingIndex = _lastGoodThreeDdfaSamples.FindIndex(
+            item => string.Equals(item.RequestId, snapshot.RequestId, StringComparison.Ordinal));
+        if (existingIndex >= 0)
+        {
+            _lastGoodThreeDdfaSamples[existingIndex] = snapshot;
+        }
+        else
+        {
+            _lastGoodThreeDdfaSamples.Add(snapshot);
+        }
+
+        if (_lastGoodThreeDdfaSamples.Count > LastGoodThreeDdfaRetainedSampleCount)
+        {
+            _lastGoodThreeDdfaSamples.RemoveRange(0, _lastGoodThreeDdfaSamples.Count - LastGoodThreeDdfaRetainedSampleCount);
+        }
+
+        _lastGoodFeatureMeshStatus =
+            $"Review caches: MediaPipe {_lastGoodFeatureMeshSamples.Count}/{LastGoodFeatureMeshRetainedSampleCount}; 3DDFA {_lastGoodThreeDdfaSamples.Count}/{LastGoodThreeDdfaRetainedSampleCount} ({snapshot.VertexCount:n0} vertices).";
+    }
+
+    private static LastGoodFeatureThreeDdfaSnapshot? CreateThreeDdfaLastGoodSnapshot(
+        ThreeDdfaOnnxSidecarResponse response,
+        DateTime sampleCapturedAtUtc)
+    {
+        if (!response.Ok
+            || !response.HasFace
+            || response.DenseVertexCount < 30000
+            || response.DenseVertices.Count < 30000
+            || response.DenseEdges.Count == 0)
+        {
+            return null;
+        }
+
+        var capturedAtUtc = ParseThreeDdfaCapturedAtUtc(response.CapturedAtUtc);
+        if (sampleCapturedAtUtc != default
+            && capturedAtUtc != default
+            && Math.Abs((capturedAtUtc - sampleCapturedAtUtc).TotalMilliseconds) > 1800d)
+        {
+            return null;
+        }
+
+        var confidencePercent = RoundThreeDdfaValue(response.ReconstructionConfidencePercent);
+        return new LastGoodFeatureThreeDdfaSnapshot
+        {
+            RequestId = response.RequestId,
+            CapturedAtUtc = capturedAtUtc == default ? sampleCapturedAtUtc : capturedAtUtc,
+            Source = response.Backend,
+            DenseVertexCount = response.DenseVertexCount,
+            DenseSampleStride = response.DenseSampleStride,
+            ReconstructionConfidencePercent = confidencePercent,
+            ARotationAroundXDegrees = RoundThreeDdfaValue(response.Pose.ARotationAroundXDegrees),
+            BRotationAroundYDegrees = RoundThreeDdfaValue(response.Pose.BRotationAroundYDegrees),
+            CRotationAroundZDegrees = RoundThreeDdfaValue(response.Pose.CRotationAroundZDegrees),
+            PoseSource = response.Pose.Source,
+            TrustDecision = response.TrustDecision,
+            Vertices = response.DenseVertices
+                .Select(static vertex => new FaceMeshLandmarkPoint
+                {
+                    Index = vertex.Index,
+                    X = RoundThreeDdfaValue(vertex.X),
+                    Y = RoundThreeDdfaValue(vertex.Y),
+                    Z = RoundThreeDdfaValue(vertex.Z)
+                })
+                .ToList(),
+            TopologyEdges = response.DenseEdges
+                .Select(edge => new LastGoodFeatureMeshWireframeEdge
+                {
+                    FromIndex = edge.FromIndex,
+                    ToIndex = edge.ToIndex,
+                    Role = "surface",
+                    Source = "3ddfa-full-resolution-topology",
+                    LengthPercent = 0d,
+                    ConfidencePercent = confidencePercent
+                })
+                .ToList(),
+            SparseLandmarks = response.SparseLandmarks
+                .Select(static vertex => new FaceMeshLandmarkPoint
+                {
+                    Index = vertex.Index,
+                    X = RoundThreeDdfaValue(vertex.X),
+                    Y = RoundThreeDdfaValue(vertex.Y),
+                    Z = RoundThreeDdfaValue(vertex.Z)
+                })
+                .ToList(),
+            CameraMatrixCoefficients = response.CameraMatrixCoefficients.Select(RoundThreeDdfaValue).ToList(),
+            ShapeCoefficients = response.ShapeCoefficients.Select(RoundThreeDdfaValue).ToList(),
+            ExpressionCoefficients = response.ExpressionCoefficients.Select(RoundThreeDdfaValue).ToList(),
+            Warnings = response.Warnings
+        };
+    }
+
+    private static double RoundThreeDdfaValue(double value)
+    {
+        return double.IsFinite(value)
+            ? Math.Round(value, 6, MidpointRounding.AwayFromZero)
+            : 0d;
+    }
+
+    private static DateTime ParseThreeDdfaCapturedAtUtc(string capturedAtUtc)
+    {
+        return DateTime.TryParse(
+                capturedAtUtc,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var parsed)
+            ? parsed
+            : default;
+    }
+
     private void TrackLastGoodFeatureMeshSample(DateTime utcNow)
     {
-        if (PersonalModelSubjectCheckBox.IsChecked != true)
+        if (AvatarSubjectCheckBox.IsChecked != true)
         {
-            _lastGoodFeatureMeshStatus = "Last good mesh waiting: confirm Chris";
+            _lastGoodFeatureMeshStatus = $"Last good mesh waiting: confirm {CurrentAvatarProfileDisplayName}";
             RefreshLastGoodFeatureMeshStabilityAudit();
             UpdateTrackingFidelityHealthText();
             return;
@@ -2738,10 +3226,10 @@ public partial class MainWindow : Window
                 _currentFaceLandmarkFrame,
                 _currentFaceLandmarkMetrics,
                 _currentFaceLockStabilityAnalysis,
-                _currentPersonalFaceCaptureQuality,
+                _currentAvatarCaptureQuality,
                 out var sample,
                 out var reason,
-                headPose: _currentHeadPoseEstimate))
+                faceGeometry: _currentFaceFrameGeometry))
         {
             _lastGoodFeatureMeshStatus = $"Last good mesh waiting: {reason}";
             RefreshLastGoodFeatureMeshStabilityAudit();
@@ -2756,13 +3244,14 @@ public partial class MainWindow : Window
         }
 
         _lastGoodFeatureMeshSamples.Add(sample);
-        if (_lastGoodFeatureMeshSamples.Count > 10)
+        if (_lastGoodFeatureMeshSamples.Count > LastGoodFeatureMeshRetainedSampleCount)
         {
-            _lastGoodFeatureMeshSamples.RemoveRange(0, _lastGoodFeatureMeshSamples.Count - 10);
+            _lastGoodFeatureMeshSamples.RemoveRange(0, _lastGoodFeatureMeshSamples.Count - LastGoodFeatureMeshRetainedSampleCount);
         }
 
         _lastGoodFeatureMeshCapturedAtUtc = utcNow;
-        _lastGoodFeatureMeshStatus = $"Last good mesh captured: {_lastGoodFeatureMeshSamples.Count}/10";
+        _lastGoodFeatureMeshStatus =
+            $"Review caches: MediaPipe {_lastGoodFeatureMeshSamples.Count}/{LastGoodFeatureMeshRetainedSampleCount}; 3DDFA {_lastGoodThreeDdfaSamples.Count}/{LastGoodThreeDdfaRetainedSampleCount}.";
         RefreshLastGoodFeatureMeshStabilityAudit();
         if (_showLiveWireframePreview)
         {
@@ -2811,8 +3300,8 @@ public partial class MainWindow : Window
         _currentFaceLandmarkCueAnalysis = null;
         _currentFaceLandmarkTrendAnalysis = FaceLandmarkTrendAnalysis.Waiting;
         _currentFaceLockStabilityAnalysis = FaceLockStabilityAnalysis.Waiting;
-        _currentHeadPoseEstimate = HeadPoseEstimate.None;
-        _currentPersonalFaceCaptureQuality = PersonalFaceCaptureQualityAssessment.Waiting;
+        _currentFaceFrameGeometry = FaceFrameGeometry.None;
+        _currentAvatarCaptureQuality = AvatarCaptureQualityAssessment.Waiting;
         _faceLandmarkTracker.Reset();
         _faceLandmarkReconstructor.Reset();
         _faceLandmarkMetricCalculator.Reset();
@@ -2820,123 +3309,49 @@ public partial class MainWindow : Window
         _faceLockStabilityAnalyzer.Reset();
     }
 
-    private void UpdatePersonalFaceModel(DateTime utcNow)
+    private void UpdateAvatarCaptureState(DateTime utcNow)
     {
-        if (PersonalModelSubjectCheckBox.IsChecked != true)
+        if (AvatarSubjectCheckBox.IsChecked != true)
         {
-            _currentPersonalFaceModelUpdate = new PersonalFaceModelUpdate(
-                false,
-                PersonalFaceModelRejectionKind.SubjectNotConfirmed,
-                "subject not confirmed; personal model collection paused",
-                0d,
-                _personalFaceModelBuilder.CurrentModel);
-            UpdatePersonalFaceCaptureQuality();
-            TrackPersonalFaceCollectionAudit(utcNow, subjectConfirmed: false, pausedForEventOrCalibration: false);
+            ResetAvatarCaptureGate("subject not confirmed; avatar capture paused");
+            UpdateAvatarCaptureQuality();
             UpdateAvatarLearningStatusUi();
             return;
         }
 
         if (!_avatarLearningRequested)
         {
-            _currentPersonalFaceModelUpdate = new PersonalFaceModelUpdate(
-                false,
-                PersonalFaceModelRejectionKind.LearningStopped,
-                "avatar learning stopped by user",
-                0d,
-                _personalFaceModelBuilder.CurrentModel);
-            UpdatePersonalFaceCaptureQuality();
-            TrackPersonalFaceCollectionAudit(utcNow, subjectConfirmed: true, pausedForEventOrCalibration: false);
+            ResetAvatarCaptureGate("avatar capture stopped by user");
+            UpdateAvatarCaptureQuality();
             UpdateAvatarLearningStatusUi();
             return;
         }
 
-        if (_avatarHistoricalDataSuspect)
-        {
-            _currentPersonalFaceModelUpdate = new PersonalFaceModelUpdate(
-                false,
-                PersonalFaceModelRejectionKind.LearningStopped,
-                "saved avatar data failed audit; rebuild before learning",
-                0d,
-                _personalFaceModelBuilder.CurrentModel);
-            UpdatePersonalFaceCaptureQuality();
-            TrackPersonalFaceCollectionAudit(utcNow, subjectConfirmed: true, pausedForEventOrCalibration: false);
-            UpdateAvatarLearningStatusUi();
-            return;
-        }
-
-        if (_avatarTrackingAuditHold)
-        {
-            _currentPersonalFaceModelUpdate = new PersonalFaceModelUpdate(
-                false,
-                PersonalFaceModelRejectionKind.TrackingAuditHold,
-                _avatarTrackingAuditHoldSummary,
-                0d,
-                _personalFaceModelBuilder.CurrentModel);
-            UpdatePersonalFaceCaptureQuality();
-            TrackPersonalFaceCollectionAudit(utcNow, subjectConfirmed: true, pausedForEventOrCalibration: false);
-            UpdateAvatarLearningStatusUi();
-            return;
-        }
-
-        if (_avatarRecentMeshStabilityHold)
-        {
-            _currentPersonalFaceModelUpdate = new PersonalFaceModelUpdate(
-                false,
-                PersonalFaceModelRejectionKind.TrackingAuditHold,
-                _avatarRecentMeshStabilitySummary,
-                0d,
-                _personalFaceModelBuilder.CurrentModel);
-            UpdatePersonalFaceCaptureQuality();
-            TrackPersonalFaceCollectionAudit(utcNow, subjectConfirmed: true, pausedForEventOrCalibration: false);
-            UpdateAvatarLearningStatusUi();
-            return;
-        }
-
-        var preflightModelUpdate = new PersonalFaceModelUpdate(
-            true,
-            PersonalFaceModelRejectionKind.None,
-            "capture-quality preflight",
-            1d,
-            _personalFaceModelBuilder.CurrentModel);
-        var preflightCaptureQuality = AnalyzePersonalFaceCaptureQuality(preflightModelUpdate);
+        ResetAvatarCaptureGate("capture-quality preflight", accepted: true);
+        var preflightCaptureQuality = AnalyzeAvatarCaptureQuality();
         if (!preflightCaptureQuality.CanCollectMeasurements)
         {
-            _currentPersonalFaceModelUpdate = new PersonalFaceModelUpdate(
-                false,
-                CaptureQualityRejectionKind(preflightCaptureQuality),
-                $"capture quality gate: {preflightCaptureQuality.PrimaryReason}",
-                0d,
-                _personalFaceModelBuilder.CurrentModel);
-            _currentPersonalFaceCaptureQuality = preflightCaptureQuality;
-            TrackPersonalFaceCollectionAudit(utcNow, subjectConfirmed: true, pausedForEventOrCalibration: false);
+            ResetAvatarCaptureGate($"capture quality gate: {preflightCaptureQuality.PrimaryReason}");
+            _currentAvatarCaptureQuality = preflightCaptureQuality;
             UpdateAvatarLearningStatusUi();
             return;
         }
 
-        _currentPersonalFaceModelUpdate = _personalFaceModelBuilder.Update(
-            _currentFaceLandmarkFrame,
-            _currentFaceLandmarkMetrics,
-            _currentFaceLockStabilityAnalysis,
-            _currentFaceLandmarkCueAnalysis,
-            _currentFaceLandmarkTrendAnalysis,
-            _currentHeadPoseEstimate,
-            allowEventLikeMeasurements: true);
-        _currentPersonalFaceCaptureQuality = AnalyzePersonalFaceCaptureQuality(_currentPersonalFaceModelUpdate);
-        TrackPersonalFaceCollectionAudit(utcNow, subjectConfirmed: true, pausedForEventOrCalibration: false);
-        SavePersonalMeasurementIfDue();
-        SavePersonalFaceModelIfDue(utcNow);
+        ResetAvatarCaptureGate(AvatarCaptureStatusReason, accepted: true);
+        _currentAvatarCaptureQuality = preflightCaptureQuality;
+        SaveAvatarReportsIfDue(utcNow);
         UpdateAvatarLearningStatusUi();
     }
 
-    private void UpdatePersonalFaceCaptureQuality()
+    private void UpdateAvatarCaptureQuality()
     {
-        _currentPersonalFaceCaptureQuality = AnalyzePersonalFaceCaptureQuality(_currentPersonalFaceModelUpdate);
+        _currentAvatarCaptureQuality = AnalyzeAvatarCaptureQuality();
     }
 
-    private PersonalFaceCaptureQualityAssessment AnalyzePersonalFaceCaptureQuality(PersonalFaceModelUpdate modelUpdate)
+    private AvatarCaptureQualityAssessment AnalyzeAvatarCaptureQuality()
     {
         var mode = CameraModeComboBox.SelectedItem as CameraVideoMode;
-        return _personalFaceCaptureQualityAnalyzer.Analyze(new PersonalFaceCaptureQualityInput
+        return _avatarCaptureQualityAnalyzer.Analyze(new AvatarCaptureQualityInput
         {
             VideoWidth = mode?.Width,
             VideoHeight = mode?.Height,
@@ -2946,88 +3361,55 @@ public partial class MainWindow : Window
             LandmarkFrame = _currentFaceLandmarkFrame,
             Metrics = _currentFaceLandmarkMetrics,
             Stability = _currentFaceLockStabilityAnalysis,
-            PersonalModelUpdate = modelUpdate,
-            MeasurementJournalBytes = _personalFaceMeasurementJournalSizeBytes
+            SubjectConfirmed = AvatarSubjectCheckBox.IsChecked == true,
+            AvatarCaptureRequested = _avatarLearningRequested,
+            CaptureGateAccepted = _avatarCaptureGateAccepted,
+            CaptureGateReason = _avatarCaptureGateReason
         });
     }
 
-    private static PersonalFaceModelRejectionKind CaptureQualityRejectionKind(PersonalFaceCaptureQualityAssessment captureQuality)
+    private void SaveAvatarReportsIfDue(DateTime utcNow)
     {
-        return captureQuality.Label.Equals("no-face", StringComparison.OrdinalIgnoreCase)
-            ? PersonalFaceModelRejectionKind.NoFace
-            : PersonalFaceModelRejectionKind.LowQuality;
-    }
-
-    private void SavePersonalMeasurementIfDue()
-    {
-        if (!_currentPersonalFaceModelUpdate.Accepted || !_currentPersonalFaceCaptureQuality.CanCollectMeasurements)
+        if (!_avatarLearningRequested
+            || AvatarSubjectCheckBox.IsChecked != true
+            || (utcNow - _lastAvatarReportSavedAtUtc).TotalSeconds < AvatarReportSaveIntervalSeconds)
         {
             return;
         }
 
         try
         {
-            var folder = GetPersonalFaceModelFolder();
-            var path = _personalFaceMeasurementJournal.WriteAcceptedSampleIfDue(
-                folder,
-                _currentPersonalFaceModelUpdate,
-                _currentFaceLandmarkFrame,
-                _currentFaceLandmarkMetrics,
-                _currentFaceLockStabilityAnalysis,
-                _currentPersonalFaceCaptureQuality,
-                _currentHeadPoseEstimate);
-            if (!string.IsNullOrWhiteSpace(path))
-            {
-                _personalFaceMeasurementJournalPath = path;
-                _personalFaceMeasurementJournalSizeBytes = PersonalFaceMeasurementJournal.GetMeasurementsSizeBytes(folder);
-            }
+            var folder = GetAvatarDataFolder();
+            QueueAvatarReportSave(CreateAvatarReportSnapshot(folder));
+            _lastAvatarReportSavedAtUtc = utcNow;
         }
         catch (Exception ex)
         {
-            SetStatus($"Personal measurement journal paused: {ex.Message}");
+            SetStatus($"Avatar report save paused: {ex.Message}");
         }
     }
 
-    private void SavePersonalFaceModelIfDue(DateTime utcNow)
+    private AvatarReportSnapshot CreateAvatarReportSnapshot(string folder)
     {
-        if (_currentPersonalFaceModelUpdate.Model.AcceptedSamples <= 0
-            || (utcNow - _lastPersonalFaceModelSavedAtUtc).TotalSeconds < PersonalFaceLiveReportSaveIntervalSeconds)
-        {
-            return;
-        }
-
-        try
-        {
-            var folder = GetPersonalFaceModelFolder();
-            QueuePersonalFaceReportSave(CreatePersonalFaceReportSnapshot(folder, _currentPersonalFaceModelUpdate.Model));
-            _lastPersonalFaceModelSavedAtUtc = utcNow;
-        }
-        catch (Exception ex)
-        {
-            SetStatus($"Personal face model save paused: {ex.Message}");
-        }
-    }
-
-    private PersonalFaceReportSnapshot CreatePersonalFaceReportSnapshot(string folder, PersonalFaceModel model)
-    {
-        var modelSnapshot = CloneForBackgroundSave(model);
         var state = GetAvatarLearningState();
-        var subjectConfirmed = PersonalModelSubjectCheckBox.IsChecked == true
-            && string.Equals(modelSnapshot.SubjectId, PersonalFaceSubjectId, StringComparison.OrdinalIgnoreCase);
+        var subjectConfirmed = AvatarSubjectCheckBox.IsChecked == true
+            && !string.IsNullOrWhiteSpace(CurrentAvatarProfileId);
 
-        return new PersonalFaceReportSnapshot(
+        return new AvatarReportSnapshot(
             folder,
-            modelSnapshot,
-            _personalFaceCollectionAuditObservations.ToList(),
-            CloneCaptureQuality(_currentPersonalFaceCaptureQuality),
+            CurrentAvatarProfileId,
+            CurrentAvatarProfileDisplayName,
+            CloneCaptureQuality(_currentAvatarCaptureQuality),
             subjectConfirmed,
             _avatarLearningRequested,
             state.Active,
             state.Title,
             state.Detail,
-            CloneForBackgroundSave(_currentHeadPoseEstimate),
+            CloneForBackgroundSave(_currentFaceFrameGeometry),
             _lastGoodFeatureMeshStability,
-            _lastGoodFeatureMeshSamples.ToList());
+            _lastGoodFeatureMeshSamples.ToList(),
+            _lastGoodThreeDdfaSamples.ToList(),
+            CloneForBackgroundSave(CreateFaceReconstructionLaneStatus()));
     }
 
     private static T CloneForBackgroundSave<T>(T value)
@@ -3036,9 +3418,9 @@ public partial class MainWindow : Window
         return JsonSerializer.Deserialize<T>(json) ?? value;
     }
 
-    private static PersonalFaceCaptureQualityAssessment CloneCaptureQuality(PersonalFaceCaptureQualityAssessment value)
+    private static AvatarCaptureQualityAssessment CloneCaptureQuality(AvatarCaptureQualityAssessment value)
     {
-        return new PersonalFaceCaptureQualityAssessment
+        return new AvatarCaptureQualityAssessment
         {
             Label = value.Label,
             ScorePercent = value.ScorePercent,
@@ -3060,40 +3442,40 @@ public partial class MainWindow : Window
         };
     }
 
-    private void QueuePersonalFaceReportSave(PersonalFaceReportSnapshot snapshot)
+    private void QueueAvatarReportSave(AvatarReportSnapshot snapshot)
     {
         lock (_personalFaceReportWriterLock)
         {
-            _pendingPersonalFaceReportSnapshot = snapshot;
-            if (_personalFaceReportWriterTask is { IsCompleted: false })
+            _pendingAvatarReportSnapshot = snapshot;
+            if (_avatarReportWriterTask is { IsCompleted: false })
             {
                 return;
             }
 
-            _personalFaceReportWriterTask = Task.Run(ProcessPersonalFaceReportWriterQueue);
+            _avatarReportWriterTask = Task.Run(ProcessAvatarReportWriterQueue);
         }
     }
 
-    private void ProcessPersonalFaceReportWriterQueue()
+    private void ProcessAvatarReportWriterQueue()
     {
         while (true)
         {
-            PersonalFaceReportSnapshot? snapshot;
+            AvatarReportSnapshot? snapshot;
             lock (_personalFaceReportWriterLock)
             {
-                snapshot = _pendingPersonalFaceReportSnapshot;
-                _pendingPersonalFaceReportSnapshot = null;
+                snapshot = _pendingAvatarReportSnapshot;
+                _pendingAvatarReportSnapshot = null;
                 if (snapshot is null)
                 {
-                    _personalFaceReportWriterTask = null;
+                    _avatarReportWriterTask = null;
                     return;
                 }
             }
 
             try
             {
-                var result = WritePersonalFaceReports(snapshot);
-                Dispatcher.BeginInvoke(() => ApplyPersonalFaceReportSaveResult(result), DispatcherPriority.Background);
+                var result = WriteAvatarReports(snapshot);
+                Dispatcher.BeginInvoke(() => ApplyAvatarReportSaveResult(result), DispatcherPriority.Background);
             }
             catch (Exception ex)
             {
@@ -3108,219 +3490,99 @@ public partial class MainWindow : Window
         }
     }
 
-    private static PersonalFaceReportSaveResult WritePersonalFaceReports(PersonalFaceReportSnapshot snapshot)
+    private static AvatarReportSaveResult WriteAvatarReports(AvatarReportSnapshot snapshot)
     {
         Directory.CreateDirectory(snapshot.Folder);
 
-        var personalFaceModelStore = new PersonalFaceModelStore();
-        var personalFaceMotionModelStore = new PersonalFaceMotionModelStore();
-        var personalFaceCorpusReadinessStore = new PersonalFaceCorpusReadinessStore();
-        var personalFaceCollectionAuditStore = new PersonalFaceCollectionAuditStore();
-        var measurementFacePreviewBuilder = new MeasurementFacePreviewBuilder();
-        var measurementFacePreviewStore = new MeasurementFacePreviewStore();
-        var measurementAvatarTrainingPackageBuilder = new MeasurementAvatarTrainingPackageBuilder();
-        var measurementAvatarTrainingPackageStore = new MeasurementAvatarTrainingPackageStore();
-        var measurementAvatarCapturePlanBuilder = new MeasurementAvatarCapturePlanBuilder();
-        var measurementAvatarCapturePlanStore = new MeasurementAvatarCapturePlanStore();
-        var measurementAvatarSystemDashboardStore = new MeasurementAvatarSystemDashboardStore();
+        var avatarSystemDashboardStore = new AvatarSystemDashboardStore();
         var lastGoodFeatureMeshStore = new LastGoodFeatureMeshStore();
+        var lastGoodThreeDdfaStore = new LastGoodThreeDdfaStore();
+        var avatarModelObservationStore = new AvatarModelObservationStore();
+        var avatarModelStore = new AvatarModelStore();
 
-        var model = snapshot.Model;
-        var samples = PersonalFaceMeasurementJournal
-            .ReadRecentSamples(snapshot.Folder, PersonalFaceMotionModelMaxSamples)
-            .Where(sample => string.Equals(sample.SubjectId, model.SubjectId, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        var observations = samples
-            .Select(PersonalFaceMotionObservation.FromMeasurementSample)
-            .ToList();
-        var motionModel = new PersonalFaceMotionModelBuilder().Build(observations);
-        if (motionModel.ObservationCount == 0)
-        {
-            motionModel.SubjectId = model.SubjectId;
-            motionModel.SubjectDisplayName = model.SubjectDisplayName;
-            motionModel.SubjectCollectionMode = model.SubjectCollectionMode;
-            motionModel.CreatedAtUtc = DateTime.UtcNow;
-            motionModel.UpdatedAtUtc = DateTime.UtcNow;
-        }
-
-        var measurementBytes = PersonalFaceMeasurementJournal.GetMeasurementsSizeBytes(snapshot.Folder);
-        var readiness = new PersonalFaceCorpusReadinessBuilder().Build(model, motionModel, samples, measurementBytes);
-        var audit = new PersonalFaceCollectionAuditBuilder().Build(model, snapshot.CollectionAuditObservations);
-
-        var personalFaceModelPath = personalFaceModelStore.Write(snapshot.Folder, model);
-        var previewGate = BuildSubjectGateForSnapshot(
-            model,
-            snapshot.SubjectConfirmed,
-            "manual subject confirmation is active",
-            "subject not confirmed for preview output");
-        var previewFiles = measurementFacePreviewStore.Write(
-            snapshot.Folder,
-            measurementFacePreviewBuilder.Build(model, previewGate));
-
-        var motionModelPath = personalFaceMotionModelStore.Write(snapshot.Folder, motionModel);
-        var readinessJsonPath = personalFaceCorpusReadinessStore.Write(snapshot.Folder, readiness);
-        var auditJsonPath = personalFaceCollectionAuditStore.Write(snapshot.Folder, audit);
-
-        var packageGate = BuildSubjectGateForSnapshot(
-            model,
-            snapshot.SubjectConfirmed,
-            "manual subject confirmation is active for avatar package",
-            "subject not confirmed for avatar package output");
-        var package = measurementAvatarTrainingPackageBuilder.Build(
-            model,
-            motionModel,
-            readiness,
-            packageGate,
-            measurementBytes,
-            collectionAudit: audit);
-        var packageFiles = measurementAvatarTrainingPackageStore.Write(snapshot.Folder, package);
-
-        var planGate = BuildSubjectGateForSnapshot(
-            model,
-            snapshot.SubjectConfirmed,
-            "manual subject confirmation is active for capture planning",
-            "subject not confirmed for capture planning");
-        var plan = measurementAvatarCapturePlanBuilder.Build(
-            model,
-            motionModel,
-            readiness,
-            planGate,
-            measurementBytes);
-        var planFiles = measurementAvatarCapturePlanStore.Write(snapshot.Folder, plan);
         var lastGoodFeatureMeshFiles = lastGoodFeatureMeshStore.Write(
             snapshot.Folder,
             new LastGoodFeatureMeshReport
             {
-                SubjectId = model.SubjectId,
-                SubjectDisplayName = model.SubjectDisplayName,
+                SubjectId = snapshot.SubjectId,
+                SubjectDisplayName = snapshot.SubjectDisplayName,
+                AvatarModelProgressHtmlPath = AvatarModelStore.GetHtmlPath(snapshot.Folder),
+                ReconstructionLane = snapshot.ReconstructionLane,
                 Samples = snapshot.LastGoodFeatureMeshSamples
             });
+        var lastGoodThreeDdfaFiles = lastGoodThreeDdfaStore.Write(
+            snapshot.Folder,
+            new LastGoodThreeDdfaReport
+            {
+                SubjectId = snapshot.SubjectId,
+                SubjectDisplayName = snapshot.SubjectDisplayName,
+                AvatarModelProgressHtmlPath = AvatarModelStore.GetHtmlPath(snapshot.Folder),
+                ReconstructionLane = snapshot.ReconstructionLane,
+                Samples = snapshot.LastGoodThreeDdfaSamples
+            });
+        var avatarModelObservations = avatarModelObservationStore.MergeAndWrite(
+            snapshot.Folder,
+            snapshot.SubjectId,
+            snapshot.SubjectDisplayName,
+            snapshot.LastGoodFeatureMeshSamples,
+            snapshot.LastGoodThreeDdfaSamples);
+        var avatarModel = AvatarModelBuilder.Build(avatarModelObservations);
+        var avatarModelJsonPath = avatarModelStore.Write(snapshot.Folder, avatarModel);
 
-        var dashboardGate = BuildSubjectGateForSnapshot(
-            model,
-            snapshot.SubjectConfirmed,
-            "manual subject confirmation is active for avatar system",
-            "subject not confirmed for avatar system");
-        var dashboard = new MeasurementAvatarSystemDashboard
+        var dashboard = new AvatarSystemDashboard
         {
-            SubjectId = model.SubjectId,
-            SubjectDisplayName = model.SubjectDisplayName,
+            SubjectId = snapshot.SubjectId,
+            SubjectDisplayName = snapshot.SubjectDisplayName,
             SubjectConfirmed = snapshot.SubjectConfirmed,
-            AvatarLearningRequested = snapshot.AvatarLearningRequested,
-            AvatarLearningActive = snapshot.AvatarLearningActive,
-            AvatarLearningStatus = snapshot.AvatarLearningStatus,
-            AvatarLearningCorrection = snapshot.AvatarLearningCorrection,
-            FaceModel = model,
-            MotionModel = motionModel,
-            LearningDataReadiness = readiness,
-            CollectionAudit = audit,
-            AvatarPackage = measurementAvatarTrainingPackageBuilder.Build(
-                model,
-                motionModel,
-                readiness,
-                dashboardGate,
-                measurementBytes,
-                collectionAudit: audit),
-            CapturePlan = measurementAvatarCapturePlanBuilder.Build(
-                model,
-                motionModel,
-                readiness,
-                dashboardGate,
-                measurementBytes),
+            AvatarCaptureRequested = snapshot.AvatarCaptureRequested,
+            AvatarCaptureActive = snapshot.AvatarCaptureActive,
+            AvatarCaptureStatus = snapshot.AvatarCaptureStatus,
+            AvatarCaptureCorrection = snapshot.AvatarCaptureCorrection,
             CurrentCaptureQuality = snapshot.CaptureQuality,
-            CurrentHeadPose = snapshot.HeadPose,
+            CurrentFaceFrameGeometry = snapshot.FaceFrameGeometry,
             LastGoodFeatureStability = snapshot.LastGoodFeatureMeshStability,
-            FacePreviewHtmlPath = previewFiles.HtmlPath,
-            LearningDataReportHtmlPath = PersonalFaceCorpusReadinessStore.GetHtmlPath(readinessJsonPath),
-            CollectionAuditHtmlPath = PersonalFaceCollectionAuditStore.GetHtmlPath(auditJsonPath),
-            AvatarPackageHtmlPath = packageFiles.HtmlPath,
-            CapturePlanHtmlPath = planFiles.HtmlPath,
-            LastGoodFeaturesHtmlPath = lastGoodFeatureMeshFiles.HtmlPath
+            ReconstructionLane = snapshot.ReconstructionLane,
+            LastGoodFeatureSampleCount = snapshot.LastGoodFeatureMeshSamples.Count,
+            LastGoodThreeDdfaSampleCount = snapshot.LastGoodThreeDdfaSamples.Count,
+            LastGoodFeatureStatus = snapshot.LastGoodFeatureMeshSamples.Count > 0
+                ? $"Retained {snapshot.LastGoodFeatureMeshSamples.Count} MediaPipe feature lock sample(s) and {snapshot.LastGoodThreeDdfaSamples.Count} 3DDFA dense sample(s) for separate review pages."
+                : "Waiting for direct eye/mouth lock before retaining MediaPipe feature-lock samples.",
+            LastGoodFeaturesHtmlPath = lastGoodFeatureMeshFiles.HtmlPath,
+            LastGoodThreeDdfaHtmlPath = lastGoodThreeDdfaFiles.HtmlPath,
+            AvatarModelStatus = avatarModel.Status,
+            AvatarModelObservationCount = avatarModelObservations.Observations.Count,
+            AvatarModelConfidencePercent = avatarModel.Identity.ConfidencePercent,
+            AvatarModelCoveragePercent = avatarModel.PoseCoverage.CoveragePercent,
+            AvatarModelCoverageSummary = avatarModel.PoseCoverage.Summary,
+            AvatarModelHtmlPath = AvatarModelStore.GetHtmlPath(snapshot.Folder)
         };
 
-        var dashboardJsonPath = measurementAvatarSystemDashboardStore.Write(snapshot.Folder, dashboard);
-        return new PersonalFaceReportSaveResult(
-            personalFaceModelPath,
-            motionModelPath,
-            PersonalFaceCorpusReadinessStore.GetHtmlPath(readinessJsonPath),
-            PersonalFaceCollectionAuditStore.GetHtmlPath(auditJsonPath),
-            previewFiles.HtmlPath,
-            packageFiles.HtmlPath,
-            planFiles.HtmlPath,
+        var dashboardJsonPath = avatarSystemDashboardStore.Write(snapshot.Folder, dashboard);
+        return new AvatarReportSaveResult(
             lastGoodFeatureMeshFiles.JsonPath,
             lastGoodFeatureMeshFiles.HtmlPath,
-            MeasurementAvatarSystemDashboardStore.GetHtmlPath(dashboardJsonPath),
-            measurementBytes,
-            motionModel,
-            readiness,
-            audit,
-            plan);
+            lastGoodThreeDdfaFiles.JsonPath,
+            lastGoodThreeDdfaFiles.HtmlPath,
+            AvatarSystemDashboardStore.GetHtmlPath(dashboardJsonPath),
+            avatarModelJsonPath,
+            AvatarModelStore.GetHtmlPath(snapshot.Folder),
+            AvatarModelObservationStore.GetJsonPath(snapshot.Folder));
     }
 
-    private static FaceReconstructionSubjectGate BuildSubjectGateForSnapshot(
-        PersonalFaceModel model,
-        bool subjectConfirmed,
-        string acceptedReason,
-        string pausedReason)
-    {
-        return FaceReconstructionSubjectGate.FromPersonalModel(
-            model,
-            subjectConfirmed,
-            reason: subjectConfirmed ? acceptedReason : pausedReason);
-    }
-
-    private void ApplyPersonalFaceReportSaveResult(PersonalFaceReportSaveResult result)
+    private void ApplyAvatarReportSaveResult(AvatarReportSaveResult result)
     {
         if (_isClosing)
         {
             return;
         }
 
-        _personalFaceModelPath = result.PersonalFaceModelPath;
-        _personalFaceMotionModelPath = result.PersonalFaceMotionModelPath;
-        _personalFaceCorpusReadinessPath = result.PersonalFaceCorpusReadinessPath;
-        _personalFaceCollectionAuditPath = result.PersonalFaceCollectionAuditPath;
-        _measurementFacePreviewPath = result.MeasurementFacePreviewPath;
-        _measurementAvatarTrainingPackagePath = result.MeasurementAvatarTrainingPackagePath;
-        _measurementAvatarCapturePlanPath = result.MeasurementAvatarCapturePlanPath;
         _lastGoodFeatureMeshJsonPath = result.LastGoodFeatureMeshJsonPath;
         _lastGoodFeatureMeshHtmlPath = result.LastGoodFeatureMeshHtmlPath;
-        _measurementAvatarSystemDashboardPath = result.MeasurementAvatarSystemDashboardPath;
-        _personalFaceMeasurementJournalSizeBytes = result.MeasurementJournalBytes;
-        _currentPersonalFaceMotionModel = result.MotionModel;
-        _currentPersonalFaceCorpusReadiness = result.CorpusReadiness;
-        ApplyAvatarHistoricalDataAudit(result.CorpusReadiness);
-        _currentPersonalFaceCollectionAudit = result.CollectionAudit;
-        _currentMeasurementAvatarCapturePlan = result.CapturePlan;
+        _lastGoodThreeDdfaJsonPath = result.LastGoodThreeDdfaJsonPath;
+        _lastGoodThreeDdfaHtmlPath = result.LastGoodThreeDdfaHtmlPath;
+        _avatarSystemDashboardPath = result.AvatarSystemDashboardPath;
+        _avatarModelHtmlPath = result.AvatarModelHtmlPath;
         UpdateAvatarLearningStatusUi();
-    }
-
-    private void TrackPersonalFaceCollectionAudit(
-        DateTime utcNow,
-        bool subjectConfirmed,
-        bool pausedForEventOrCalibration)
-    {
-        var reviewedAtUtc = _currentFaceLandmarkFrame.CapturedAtUtc != default
-            ? _currentFaceLandmarkFrame.CapturedAtUtc
-            : utcNow;
-        var hasFace = _currentFaceLandmarkFrame.HasFace || _currentFaceLandmarkMetrics.HasFace || _currentFaceFeatureDetection.HasFace;
-        _personalFaceCollectionAuditObservations.Add(PersonalFaceCollectionAuditObservation.Create(
-            reviewedAtUtc,
-            subjectConfirmed,
-            pausedForEventOrCalibration,
-            hasFace,
-            _currentPersonalFaceModelUpdate,
-            _currentPersonalFaceCaptureQuality));
-        if (_personalFaceCollectionAuditObservations.Count > PersonalFaceCollectionAuditMaxObservations)
-        {
-            _personalFaceCollectionAuditObservations.RemoveRange(
-                0,
-                _personalFaceCollectionAuditObservations.Count - PersonalFaceCollectionAuditMaxObservations);
-        }
-
-        _currentPersonalFaceCollectionAudit = _personalFaceCollectionAuditBuilder.Build(
-            _currentPersonalFaceModelUpdate.Model,
-            _personalFaceCollectionAuditObservations);
     }
 
     private static void OpenLocalFile(string path)
@@ -3337,10 +3599,10 @@ public partial class MainWindow : Window
         });
     }
 
-    private static string GetMeasurementAvatarSystemDashboardHtmlPath(string folder)
+    private static string GetAvatarSystemDashboardHtmlPath(string folder)
     {
-        var dashboardJsonPath = Path.Combine(folder, MeasurementAvatarSystemDashboardStore.DefaultJsonFileName);
-        return MeasurementAvatarSystemDashboardStore.GetHtmlPath(dashboardJsonPath);
+        var dashboardJsonPath = Path.Combine(folder, AvatarSystemDashboardStore.DefaultJsonFileName);
+        return AvatarSystemDashboardStore.GetHtmlPath(dashboardJsonPath);
     }
 
     private static void EnsureAvatarSystemPlaceholder(string path)
@@ -3712,7 +3974,7 @@ public partial class MainWindow : Window
             _currentFaceLandmarkTrendAnalysis,
             _currentFaceLockStabilityAnalysis,
             _faceLandmarkTracker.LastBackendStatus,
-            _currentPersonalFaceCaptureQuality);
+            _currentAvatarCaptureQuality);
         if (_activeEpisodeStartedAt is DateTime startedAt)
         {
             _landmarkEventTimeline.Add(
@@ -3723,7 +3985,7 @@ public partial class MainWindow : Window
                 _currentFaceLandmarkTrendAnalysis,
                 _currentFaceLockStabilityAnalysis,
                 _faceLandmarkTracker.LastBackendStatus,
-                _currentPersonalFaceCaptureQuality);
+                _currentAvatarCaptureQuality);
         }
     }
 
@@ -3927,17 +4189,18 @@ public partial class MainWindow : Window
         }
 
         _outputFolder = dialog.FolderName;
-        SaveOutputFolderSetting(_outputFolder);
+        SaveOutputFolderPointer(_outputFolder);
         var savedCurrentBaseline = SaveAlertBaselineToOutputFolder();
         var loadedBaseline = savedCurrentBaseline || LoadAlertBaselineFromOutputFolder(showStatus: false);
         UpdateOutputFolderText();
         var eventListStatus = SyncTodaysEventListAfterOutputFolderChange();
-        var personalModelStatus = LoadPersonalFaceModelFromOutputFolder(showStatus: false);
+        InitializeAvatarProfiles(promptForStartupUser: false);
+        var avatarStatus = PrepareAvatarCaptureFolder(showStatus: false);
         UpdateCalibrationGuard();
         var baselineStatus = loadedBaseline
             ? $"Output folder set: {_outputFolder}. Alert baseline is saved there."
             : $"Output folder set: {_outputFolder}. Calibrate Alert Baseline once when you are alert and symptom-free.";
-        MonitorStatusText.Text = $"{baselineStatus} {eventListStatus} {personalModelStatus}".Trim();
+        MonitorStatusText.Text = $"{baselineStatus} {eventListStatus} {avatarStatus}".Trim();
     }
 
     private void CloseClicked(object sender, RoutedEventArgs e)
@@ -4057,7 +4320,7 @@ public partial class MainWindow : Window
             return requested;
         }
 
-        var saved = LoadOutputFolderSetting();
+        var saved = LoadOutputFolderPointer();
         if (!string.IsNullOrWhiteSpace(saved))
         {
             return saved;
@@ -4070,6 +4333,38 @@ public partial class MainWindow : Window
         }
 
         return Path.Combine(AppContext.BaseDirectory, "EpisodeMonitorSessions");
+    }
+
+    private void EnsureOutputFolderConfiguredForLaunch()
+    {
+        if (TryResolveRequestedOutputFolder(_startupOptions.OutputFolder, out var requested))
+        {
+            _outputFolder = requested;
+            Directory.CreateDirectory(_outputFolder);
+            SaveOutputFolderPointer(_outputFolder);
+            return;
+        }
+
+        var configured = LoadOutputFolderPointer();
+        if (IsExistingFolder(configured))
+        {
+            _outputFolder = configured;
+            return;
+        }
+
+        EnsureOutputFolderPointerFileExists();
+        var reason = string.IsNullOrWhiteSpace(configured)
+            ? "Episode Monitor needs a storage folder for events, videos, calibration data, and avatar measurements."
+            : $"The configured storage folder was not found:{Environment.NewLine}{configured}{Environment.NewLine}{Environment.NewLine}Choose where Episode Monitor should store its data.";
+        var selected = PromptForOutputFolder(reason, configured);
+        if (string.IsNullOrWhiteSpace(selected))
+        {
+            selected = ResolveFallbackOutputFolder();
+        }
+
+        Directory.CreateDirectory(selected);
+        _outputFolder = selected;
+        SaveOutputFolderPointer(_outputFolder);
     }
 
     private static bool TryResolveRequestedOutputFolder(string requestedOutputFolder, out string outputFolder)
@@ -4099,81 +4394,117 @@ public partial class MainWindow : Window
         }
     }
 
-    private static string LoadOutputFolderSetting()
-    {
-        var saved = GetSettingsPaths()
-            .Select(ReadOutputFolderSetting)
-            .Where(static settings => !string.IsNullOrWhiteSpace(settings?.OutputFolder))
-            .OrderByDescending(static settings => settings!.UpdatedAtUtc)
-            .FirstOrDefault();
-        return saved?.OutputFolder.Trim() ?? "";
-    }
-
-    private static void SaveOutputFolderSetting(string outputFolder)
-    {
-        var settings = new EpisodeMonitorSettings
-        {
-            OutputFolder = outputFolder,
-            UpdatedAtUtc = DateTime.UtcNow
-        };
-        var json = JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true });
-
-        foreach (var path in GetSettingsPaths())
-        {
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(path) ?? AppContext.BaseDirectory);
-                File.WriteAllText(path, json, Encoding.UTF8);
-            }
-            catch
-            {
-                // Output folder persistence should never interrupt monitoring.
-            }
-        }
-    }
-
-    private static EpisodeMonitorSettings? ReadOutputFolderSetting(string path)
+    private static string LoadOutputFolderPointer()
     {
         try
         {
+            var path = GetOutputFolderPointerPath();
             if (!File.Exists(path))
             {
-                return null;
+                return "";
             }
 
-            return JsonSerializer.Deserialize<EpisodeMonitorSettings>(
-                File.ReadAllText(path, Encoding.UTF8));
+            return File.ReadLines(path, Encoding.UTF8)
+                .FirstOrDefault(static line => !string.IsNullOrWhiteSpace(line))
+                ?.Trim()
+                .Trim('"') ?? "";
         }
         catch
         {
-            return null;
+            return "";
         }
     }
 
-    private static IReadOnlyList<string> GetSettingsPaths()
+    private static void SaveOutputFolderPointer(string outputFolder)
     {
-        var paths = new List<string>
-        {
-            Path.Combine(AppContext.BaseDirectory, SettingsFileName)
-        };
-
         try
         {
-            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            if (!string.IsNullOrWhiteSpace(localAppData))
+            var path = GetOutputFolderPointerPath();
+            Directory.CreateDirectory(Path.GetDirectoryName(path) ?? AppContext.BaseDirectory);
+            File.WriteAllText(path, (outputFolder ?? "").Trim() + Environment.NewLine, Encoding.UTF8);
+        }
+        catch
+        {
+            // Output folder persistence should never interrupt monitoring.
+        }
+    }
+
+    private static void EnsureOutputFolderPointerFileExists()
+    {
+        try
+        {
+            var path = GetOutputFolderPointerPath();
+            if (!File.Exists(path))
             {
-                paths.Add(Path.Combine(localAppData, "EpisodeMonitor", SettingsFileName));
+                Directory.CreateDirectory(Path.GetDirectoryName(path) ?? AppContext.BaseDirectory);
+                File.WriteAllText(path, "", Encoding.UTF8);
             }
         }
         catch
         {
-            // A beside-exe settings file is still enough if the user profile path is unavailable.
+            // The folder picker can still run even if the pointer file could not be pre-created.
+        }
+    }
+
+    private static string GetOutputFolderPointerPath()
+    {
+        return Path.Combine(AppContext.BaseDirectory, OutputFolderPointerFileName);
+    }
+
+    private static bool IsExistingFolder(string folder)
+    {
+        return !string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder);
+    }
+
+    private string PromptForOutputFolder(string message, string configuredFolder)
+    {
+        MessageBox.Show(
+            this,
+            $"{message}{Environment.NewLine}{Environment.NewLine}The selected folder path will be saved in:{Environment.NewLine}{GetOutputFolderPointerPath()}",
+            "Choose Episode Monitor Storage",
+            MessageBoxButton.OK,
+            MessageBoxImage.Information);
+
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Choose Episode Monitor storage folder",
+            InitialDirectory = GetOutputFolderPickerInitialDirectory(configuredFolder),
+            Multiselect = false
+        };
+
+        return dialog.ShowDialog(this) == true ? dialog.FolderName : "";
+    }
+
+    private static string GetOutputFolderPickerInitialDirectory(string configuredFolder)
+    {
+        if (IsExistingFolder(configuredFolder))
+        {
+            return configuredFolder;
         }
 
-        return paths
-            .Where(static path => !string.IsNullOrWhiteSpace(path))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        if (Directory.Exists(PreferredExternalOutputFolder))
+        {
+            return PreferredExternalOutputFolder;
+        }
+
+        var preferredRoot = Path.GetPathRoot(PreferredExternalOutputFolder);
+        if (!string.IsNullOrWhiteSpace(preferredRoot) && Directory.Exists(preferredRoot))
+        {
+            return preferredRoot;
+        }
+
+        return AppContext.BaseDirectory;
+    }
+
+    private static string ResolveFallbackOutputFolder()
+    {
+        var preferredRoot = Path.GetPathRoot(PreferredExternalOutputFolder);
+        if (!string.IsNullOrWhiteSpace(preferredRoot) && Directory.Exists(preferredRoot))
+        {
+            return PreferredExternalOutputFolder;
+        }
+
+        return Path.Combine(AppContext.BaseDirectory, "EpisodeMonitorSessions");
     }
 
     private static string FormatBytes(long bytes)
@@ -4380,65 +4711,20 @@ public partial class MainWindow : Window
         }
     }
 
-    private string LoadPersonalFaceModelFromOutputFolder(bool showStatus)
+    private string PrepareAvatarCaptureFolder(bool showStatus)
     {
-        var folder = GetPersonalFaceModelFolder();
+        var folder = GetAvatarDataFolder();
         try
         {
-            var budgetReport = PersonalFaceMeasurementJournal.EnforceBudgetForModelFolder(folder);
-            var model = _personalFaceModelStore.TryRead(folder);
-            _personalFaceMeasurementJournalSizeBytes = budgetReport.BytesAfter;
-            var budgetStatus = budgetReport.DeletedFileCount > 0
-                ? $" Pruned {budgetReport.DeletedFileCount} old measurement file{(budgetReport.DeletedFileCount == 1 ? "" : "s")} to keep the journal under {FormatBytes(budgetReport.BudgetBytes)}."
-                : "";
-            if (model is null)
-            {
-                _avatarHistoricalDataSuspect = false;
-                _avatarHistoricalDataAuditSummary = "";
-                _avatarTrackingAuditHold = false;
-                _avatarTrackingAuditHoldSummary = "";
-                _currentMeasurementAvatarCapturePlan = null;
-                var emptyStatus = _personalFaceModelBuilder.CurrentModel.AcceptedSamples > 0
-                    ? "No saved Avatar model found in this output folder; current in-memory model will continue and save there."
-                    : "No saved Avatar model found in this output folder yet.";
-                emptyStatus += budgetStatus;
-                if (showStatus)
-                {
-                    MonitorStatusText.Text = emptyStatus;
-                }
-
-                return emptyStatus;
-            }
-
-            var auditSnapshot = BuildPersonalFaceAuditSnapshot(folder, model);
-            _currentPersonalFaceMotionModel = auditSnapshot.MotionModel;
-            _currentPersonalFaceCorpusReadiness = auditSnapshot.Readiness;
-            ApplyAvatarHistoricalDataAudit(auditSnapshot.Readiness);
-            _personalFaceModelBuilder.LoadModel(model);
-            _currentPersonalFaceModelUpdate = new PersonalFaceModelUpdate(
-                false,
-                PersonalFaceModelRejectionKind.LearningStopped,
-                "loaded saved Avatar model; learning resumes when Start Avatar Learning is active",
-                0d,
-                _personalFaceModelBuilder.CurrentModel);
-            _personalFaceModelPath = Path.Combine(folder, _personalFaceModelStore.FileName);
-            _personalFaceMotionModelPath = Path.Combine(folder, _personalFaceMotionModelStore.FileName);
-            _personalFaceCorpusReadinessPath = Path.Combine(folder, PersonalFaceCorpusReadinessStore.DefaultJsonFileName);
-            _personalFaceCollectionAuditPath = Path.Combine(folder, PersonalFaceCollectionAuditStore.DefaultJsonFileName);
-            _measurementFacePreviewPath = Path.Combine(folder, MeasurementFacePreviewStore.HtmlFileName);
-            _measurementAvatarTrainingPackagePath = Path.Combine(folder, MeasurementAvatarTrainingPackageStore.HtmlFileName);
-            _measurementAvatarCapturePlanPath = Path.Combine(folder, MeasurementAvatarCapturePlanStore.HtmlFileName);
-            _measurementAvatarSystemDashboardPath = GetMeasurementAvatarSystemDashboardHtmlPath(folder);
-            QueuePersonalFaceReportSave(CreatePersonalFaceReportSnapshot(folder, _currentPersonalFaceModelUpdate.Model));
-            UpdatePersonalFaceCaptureQuality();
+            Directory.CreateDirectory(folder);
+            ResetAvatarCaptureGate("avatar capture folder ready; 3DDFA_V2 ONNX owns avatar reconstruction");
+            _avatarSystemDashboardPath = GetAvatarSystemDashboardHtmlPath(folder);
+            _avatarModelHtmlPath = AvatarModelStore.GetHtmlPath(folder);
+            QueueAvatarReportSave(CreateAvatarReportSnapshot(folder));
+            UpdateAvatarCaptureQuality();
             UpdateAvatarLearningStatusUi();
 
-            var auditStatus = _avatarHistoricalDataSuspect
-                ? $" {_avatarHistoricalDataAuditSummary} Rebuild Avatar Data before collecting more."
-                : _avatarTrackingAuditHold
-                    ? $" {_avatarTrackingAuditHoldSummary} Review tracking before collecting more."
-                : "";
-            var status = $"Loaded Avatar model: {model.AcceptedSamples} accepted sample{(model.AcceptedSamples == 1 ? "" : "s")}; measurements {FormatBytes(_personalFaceMeasurementJournalSizeBytes)}.{budgetStatus}{auditStatus}";
+            var status = $"Avatar capture folder ready: {folder}. 3DDFA_V2 ONNX stores dense reconstruction review data; MediaPipe eye/jaw/brow tracking remains live.";
             if (showStatus)
             {
                 MonitorStatusText.Text = status;
@@ -4448,7 +4734,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            var status = $"Could not load saved Avatar model: {ex.Message}";
+            var status = $"Could not prepare Avatar capture folder: {ex.Message}";
             if (showStatus)
             {
                 MonitorStatusText.Text = status;
@@ -4458,9 +4744,9 @@ public partial class MainWindow : Window
         }
     }
 
-    private string GetPersonalFaceModelFolder()
+    private string GetAvatarDataFolder()
     {
-        return Path.Combine(_outputFolder, PersonalFaceModelFolderName);
+        return _avatarProfileStore.GetProfileFolder(_outputFolder, _currentAvatarProfile);
     }
 
     private static string CreateUniqueArchivePath(string archiveRoot, DateTime utcNow)
@@ -4473,52 +4759,6 @@ public partial class MainWindow : Window
         }
 
         return path;
-    }
-
-    private static PersonalFaceAuditSnapshot BuildPersonalFaceAuditSnapshot(string folder, PersonalFaceModel model)
-    {
-        var samples = PersonalFaceMeasurementJournal
-            .ReadRecentSamples(folder, PersonalFaceMotionModelMaxSamples)
-            .Where(sample => string.Equals(sample.SubjectId, model.SubjectId, StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        var motionModel = new PersonalFaceMotionModelBuilder().Build(samples.Select(PersonalFaceMotionObservation.FromMeasurementSample));
-        if (motionModel.ObservationCount == 0)
-        {
-            motionModel.SubjectId = model.SubjectId;
-            motionModel.SubjectDisplayName = model.SubjectDisplayName;
-            motionModel.SubjectCollectionMode = model.SubjectCollectionMode;
-            motionModel.CreatedAtUtc = DateTime.UtcNow;
-            motionModel.UpdatedAtUtc = DateTime.UtcNow;
-        }
-
-        var readiness = new PersonalFaceCorpusReadinessBuilder().Build(
-            model,
-            motionModel,
-            samples,
-            PersonalFaceMeasurementJournal.GetMeasurementsSizeBytes(folder));
-        return new PersonalFaceAuditSnapshot(motionModel, readiness);
-    }
-
-    private void ApplyAvatarHistoricalDataAudit(PersonalFaceCorpusReadiness readiness)
-    {
-        _avatarHistoricalDataSuspect = readiness.AcceptedBaselineSamples >= PersonalFaceDataAuditMinimumSamplesToBlock
-            && readiness.DataAuditHealthPercent > 0d
-            && readiness.DataAuditHealthPercent < PersonalFaceDataAuditBlockThresholdPercent;
-        _avatarHistoricalDataAuditSummary = _avatarHistoricalDataSuspect
-            ? FormatAvatarDataAuditSummary(readiness)
-            : "";
-        var auditGate = PersonalFaceLearningAuditGate.Evaluate(readiness);
-        _avatarTrackingAuditHold = !_avatarHistoricalDataSuspect && auditGate.HoldLearning;
-        _avatarTrackingAuditHoldSummary = _avatarTrackingAuditHold
-            ? auditGate.Reason
-            : "";
-    }
-
-    private static string FormatAvatarDataAuditSummary(PersonalFaceCorpusReadiness readiness)
-    {
-        var finding = readiness.DataAuditFindings.FirstOrDefault();
-        var findingText = string.IsNullOrWhiteSpace(finding) ? "" : $" Finding: {finding}";
-        return $"Saved Avatar data failed audit ({readiness.DataAuditHealthPercent:0.#}% health; pose {readiness.PoseEstimationHealthPercent:0.#}%, feature anchoring {readiness.FeatureAnchoringHealthPercent:0.#}%, jaw scale {readiness.JawDroopScaleHealthPercent:0.#}%).{findingText}";
     }
 
     private string GetAlertBaselinePath()
@@ -4536,63 +4776,19 @@ public partial class MainWindow : Window
         return CameraModeComboBox.SelectedItem is CameraVideoMode mode ? mode.Label : "";
     }
 
-    private HeadPoseCalibration GetCurrentHeadPoseCalibration()
+    private FaceFrameGeometryCalibration GetCurrentFaceFrameGeometryCalibration()
     {
-        var model = _currentPersonalFaceModelUpdate.Model;
-        var learnedReferenceEyeSpan = TryEstimateLearnedReferenceInterEyeFrameWidth(model, out var referenceSamples);
         var cameraName = GetSelectedCameraName();
         if (cameraName.Contains("Insta360 Link 2 Pro", StringComparison.OrdinalIgnoreCase))
         {
-            return new HeadPoseCalibration
+            return new FaceFrameGeometryCalibration
             {
                 CameraHorizontalFovDegrees = Insta360Link2ProHorizontalFovDegrees,
-                ReferenceInterEyeFrameWidth = learnedReferenceEyeSpan,
-                ReferenceSampleCount = referenceSamples,
-                ReferenceSource = learnedReferenceEyeSpan is > 0d
-                    ? $"learned {PersonalFaceSubjectDisplayName} face scale ({referenceSamples} samples)"
-                    : ""
+                ReferenceSource = "camera FOV estimate"
             };
         }
 
-        return learnedReferenceEyeSpan is > 0d
-            ? new HeadPoseCalibration
-            {
-                ReferenceInterEyeFrameWidth = learnedReferenceEyeSpan,
-                ReferenceSampleCount = referenceSamples,
-                ReferenceSource = $"learned {PersonalFaceSubjectDisplayName} face scale ({referenceSamples} samples)"
-            }
-            : HeadPoseCalibration.None;
-    }
-
-    private static double? TryEstimateLearnedReferenceInterEyeFrameWidth(
-        PersonalFaceModel model,
-        out int referenceSamples)
-    {
-        ArgumentNullException.ThrowIfNull(model);
-
-        referenceSamples = Math.Min(model.FaceWidth.SampleCount, model.InterEyeDistanceToFaceWidth.SampleCount);
-        if (referenceSamples < PersonalFacePoseReferenceMinimumSamples)
-        {
-            return null;
-        }
-
-        var faceWidth = MetricValue(model.FaceWidth);
-        var interEyeToFaceWidth = MetricValue(model.InterEyeDistanceToFaceWidth);
-        if (faceWidth is not > 0.04d or > 0.95d
-            || interEyeToFaceWidth is not > 0.08d or > 0.75d)
-        {
-            return null;
-        }
-
-        var interEyeFrameWidth = faceWidth.Value * interEyeToFaceWidth.Value;
-        return interEyeFrameWidth is > 0.01d and < 0.75d
-            ? interEyeFrameWidth
-            : null;
-    }
-
-    private static double? MetricValue(PersonalMetricDistribution distribution)
-    {
-        return distribution.ExponentialMovingAverage ?? distribution.Average;
+        return FaceFrameGeometryCalibration.None;
     }
 
     private bool IsAlertBaselineCameraSetupDifferent()
@@ -4743,22 +4939,22 @@ public partial class MainWindow : Window
                 LandmarkEyeQuality = _currentFaceLandmarkMetrics.EyeMeasurementQualityPercent,
                 LandmarkMouthQuality = _currentFaceLandmarkMetrics.MouthMeasurementQualityPercent,
                 LandmarkOverallQuality = _currentFaceLandmarkMetrics.OverallMeasurementQualityPercent,
-                CaptureQualityLabel = _currentPersonalFaceCaptureQuality.Label,
-                CaptureQualityScore = _currentPersonalFaceCaptureQuality.ScorePercent,
-                CaptureQualityCanCollect = _currentPersonalFaceCaptureQuality.CanCollectMeasurements,
-                CaptureQualityAvatarGrade = _currentPersonalFaceCaptureQuality.StrongEnoughForAvatarLearning,
-                CaptureQualityReason = _currentPersonalFaceCaptureQuality.PrimaryReason,
-                CaptureQualityCameraModeScore = _currentPersonalFaceCaptureQuality.CameraModeScorePercent,
-                CaptureQualityFaceScaleScore = _currentPersonalFaceCaptureQuality.FaceScaleScorePercent,
-                CaptureQualityEyeScore = _currentPersonalFaceCaptureQuality.EyeEvidenceScorePercent,
-                CaptureQualityMouthScore = _currentPersonalFaceCaptureQuality.MouthEvidenceScorePercent,
-                CaptureQualityStabilityScore = _currentPersonalFaceCaptureQuality.StabilityScorePercent,
-                CaptureQualityGlassesScore = _currentPersonalFaceCaptureQuality.GlassesRiskScorePercent,
-                CaptureQualityStorageScore = _currentPersonalFaceCaptureQuality.StorageScorePercent,
-                CaptureQualityFaceWidth = _currentPersonalFaceCaptureQuality.FaceWidthPercent,
-                CaptureQualityFaceHeight = _currentPersonalFaceCaptureQuality.FaceHeightPercent,
-                CaptureQualityIssues = _currentPersonalFaceCaptureQuality.Issues,
-                CaptureQualitySuggestions = _currentPersonalFaceCaptureQuality.Suggestions,
+                CaptureQualityLabel = _currentAvatarCaptureQuality.Label,
+                CaptureQualityScore = _currentAvatarCaptureQuality.ScorePercent,
+                CaptureQualityCanCollect = _currentAvatarCaptureQuality.CanCollectMeasurements,
+                CaptureQualityAvatarGrade = _currentAvatarCaptureQuality.StrongEnoughForAvatarLearning,
+                CaptureQualityReason = _currentAvatarCaptureQuality.PrimaryReason,
+                CaptureQualityCameraModeScore = _currentAvatarCaptureQuality.CameraModeScorePercent,
+                CaptureQualityFaceScaleScore = _currentAvatarCaptureQuality.FaceScaleScorePercent,
+                CaptureQualityEyeScore = _currentAvatarCaptureQuality.EyeEvidenceScorePercent,
+                CaptureQualityMouthScore = _currentAvatarCaptureQuality.MouthEvidenceScorePercent,
+                CaptureQualityStabilityScore = _currentAvatarCaptureQuality.StabilityScorePercent,
+                CaptureQualityGlassesScore = _currentAvatarCaptureQuality.GlassesRiskScorePercent,
+                CaptureQualityStorageScore = _currentAvatarCaptureQuality.StorageScorePercent,
+                CaptureQualityFaceWidth = _currentAvatarCaptureQuality.FaceWidthPercent,
+                CaptureQualityFaceHeight = _currentAvatarCaptureQuality.FaceHeightPercent,
+                CaptureQualityIssues = _currentAvatarCaptureQuality.Issues,
+                CaptureQualitySuggestions = _currentAvatarCaptureQuality.Suggestions,
                 LandmarkFaceReliabilityStatus = _currentFaceLockStabilityAnalysis.Status,
                 LandmarkFaceReliabilitySamples = _currentFaceLockStabilityAnalysis.SampleCount,
                 LandmarkFaceReliability = _currentFaceLockStabilityAnalysis.CompositeReliabilityPercent,
@@ -4932,22 +5128,22 @@ public partial class MainWindow : Window
                 Csv(FormatOptional(_currentFaceLandmarkMetrics.EyeMeasurementQualityPercent)),
                 Csv(FormatOptional(_currentFaceLandmarkMetrics.MouthMeasurementQualityPercent)),
                 Csv(FormatOptional(_currentFaceLandmarkMetrics.OverallMeasurementQualityPercent)),
-                Csv(_currentPersonalFaceCaptureQuality.Label),
-                Csv(FormatOptional(_currentPersonalFaceCaptureQuality.ScorePercent)),
-                Csv(FormatOptional(_currentPersonalFaceCaptureQuality.CanCollectMeasurements)),
-                Csv(FormatOptional(_currentPersonalFaceCaptureQuality.StrongEnoughForAvatarLearning)),
-                Csv(_currentPersonalFaceCaptureQuality.PrimaryReason),
-                Csv(FormatOptional(_currentPersonalFaceCaptureQuality.CameraModeScorePercent)),
-                Csv(FormatOptional(_currentPersonalFaceCaptureQuality.FaceScaleScorePercent)),
-                Csv(FormatOptional(_currentPersonalFaceCaptureQuality.EyeEvidenceScorePercent)),
-                Csv(FormatOptional(_currentPersonalFaceCaptureQuality.MouthEvidenceScorePercent)),
-                Csv(FormatOptional(_currentPersonalFaceCaptureQuality.StabilityScorePercent)),
-                Csv(FormatOptional(_currentPersonalFaceCaptureQuality.GlassesRiskScorePercent)),
-                Csv(FormatOptional(_currentPersonalFaceCaptureQuality.StorageScorePercent)),
-                Csv(FormatOptional(_currentPersonalFaceCaptureQuality.FaceWidthPercent)),
-                Csv(FormatOptional(_currentPersonalFaceCaptureQuality.FaceHeightPercent)),
-                Csv(string.Join("; ", _currentPersonalFaceCaptureQuality.Issues)),
-                Csv(string.Join("; ", _currentPersonalFaceCaptureQuality.Suggestions)),
+                Csv(_currentAvatarCaptureQuality.Label),
+                Csv(FormatOptional(_currentAvatarCaptureQuality.ScorePercent)),
+                Csv(FormatOptional(_currentAvatarCaptureQuality.CanCollectMeasurements)),
+                Csv(FormatOptional(_currentAvatarCaptureQuality.StrongEnoughForAvatarLearning)),
+                Csv(_currentAvatarCaptureQuality.PrimaryReason),
+                Csv(FormatOptional(_currentAvatarCaptureQuality.CameraModeScorePercent)),
+                Csv(FormatOptional(_currentAvatarCaptureQuality.FaceScaleScorePercent)),
+                Csv(FormatOptional(_currentAvatarCaptureQuality.EyeEvidenceScorePercent)),
+                Csv(FormatOptional(_currentAvatarCaptureQuality.MouthEvidenceScorePercent)),
+                Csv(FormatOptional(_currentAvatarCaptureQuality.StabilityScorePercent)),
+                Csv(FormatOptional(_currentAvatarCaptureQuality.GlassesRiskScorePercent)),
+                Csv(FormatOptional(_currentAvatarCaptureQuality.StorageScorePercent)),
+                Csv(FormatOptional(_currentAvatarCaptureQuality.FaceWidthPercent)),
+                Csv(FormatOptional(_currentAvatarCaptureQuality.FaceHeightPercent)),
+                Csv(string.Join("; ", _currentAvatarCaptureQuality.Issues)),
+                Csv(string.Join("; ", _currentAvatarCaptureQuality.Suggestions)),
                 Csv(_currentFaceLockStabilityAnalysis.Status),
                 Csv(_currentFaceLockStabilityAnalysis.SampleCount.ToString(CultureInfo.InvariantCulture)),
                 Csv(FormatOptional(_currentFaceLockStabilityAnalysis.CompositeReliabilityPercent)),
@@ -5325,23 +5521,29 @@ public partial class MainWindow : Window
         {
             AddWireframeText(
                 "Live wireframe waiting",
-                "Confirm Chris and let the dense tracker capture a good eye, mouth, and brow lock.",
+                $"Confirm {CurrentAvatarProfileDisplayName}, start avatar capture, and let MediaPipe capture a strong eye/mouth lock.",
                 18,
                 18);
             return;
         }
 
-        var projection = BuildLiveWireframeProjection(sample, width, height);
+        DrawMediaPipeLiveWireframeView(sample, new Rect(0d, 0d, width, height), "Live wireframe");
+    }
+
+    private void DrawMediaPipeLiveWireframeView(LastGoodFeatureMeshSample sample, Rect rect, string title)
+    {
+        var projection = BuildLiveWireframeProjection(sample, rect.Width, rect.Height);
+        projection = OffsetProjection(projection, rect.X, rect.Y);
         var pointMap = projection.Points;
-        var surfaceBrush = CreateFrozenBrush(0x2f, 0x6c, 0x8f, 0x92);
+        var surfaceBrush = CreateFrozenBrush(0x2f, 0x6c, 0x8f, 0x58);
         foreach (var edge in sample.WireframeEdges.Where(static edge => edge.Role == "surface"))
         {
-            DrawWireframeEdge(edge, pointMap, width, height, surfaceBrush, 0.72d);
+            DrawWireframeEdge(edge, pointMap, rect.Width, rect.Height, surfaceBrush, 0.42d);
         }
 
         foreach (var edge in sample.WireframeEdges.Where(static edge => edge.Role != "surface"))
         {
-            DrawWireframeEdge(edge, pointMap, width, height, BrushForWireframeRole(edge.Role), 1.75d);
+            DrawWireframeEdge(edge, pointMap, rect.Width, rect.Height, BrushForWireframeRole(edge.Role), 1.75d);
         }
 
         var featureIndexes = sample.FeatureGroups
@@ -5374,10 +5576,10 @@ public partial class MainWindow : Window
         }
 
         AddWireframeText(
-            $"Live wireframe: {sample.PointCount} points, {sample.WireframeEdges.Count} edges",
+            $"{title}: {sample.PointCount} points, {sample.WireframeEdges.Count} edges",
             $"{projection.Mode}. Quality {sample.OverallQualityPercent:0}% | eyes {sample.EyeQualityPercent:0}% | brows {sample.BrowQualityPercent:0}% ({FormatRatioPercent(sample.AverageBrowHeightRatio)}) | mouth {sample.MouthQualityPercent:0}% | A/B/C {sample.HeadPitchDegrees:0}/{sample.HeadYawDegrees:0}/{sample.HeadRollDegrees:0} | B lock {_lastGoodFeatureMeshStability.YawStatus} ({_lastGoodFeatureMeshStability.YawRangeDegrees:0.#} deg)",
-            18,
-            18);
+            rect.X + 18,
+            rect.Y + 18);
     }
 
     private void DrawWireframeEdge(
@@ -5405,6 +5607,31 @@ public partial class MainWindow : Window
             IsHitTestVisible = false
         };
         LiveWireframeCanvas.Children.Add(line);
+    }
+
+    private static LiveWireframeProjection OffsetProjection(
+        LiveWireframeProjection projection,
+        double offsetX,
+        double offsetY)
+    {
+        if (Math.Abs(offsetX) < 0.001d && Math.Abs(offsetY) < 0.001d)
+        {
+            return projection;
+        }
+
+        var points = projection.Points.ToDictionary(
+            static pair => pair.Key,
+            pair => pair.Value with
+            {
+                X = pair.Value.X + offsetX,
+                Y = pair.Value.Y + offsetY
+            });
+        return projection with
+        {
+            Points = points,
+            AxisOriginX = projection.AxisOriginX + offsetX,
+            AxisOriginY = projection.AxisOriginY + offsetY
+        };
     }
 
     private LiveWireframeProjection BuildLiveWireframeProjection(
@@ -5485,9 +5712,9 @@ public partial class MainWindow : Window
         yAxis = Normalize(Cross(zAxis, xAxis));
         var faceHeight = Distance(eyeMid, chin);
         var faceScale = Math.Max(0.0001d, Math.Max(interEyeDistance * 2.35d, faceHeight * 1.28d));
-        var screenScale = Math.Min(width, height) * 1.08d;
+        var screenScale = Math.Min(width, height) * 0.50d;
         var originX = width * 0.5d;
-        var originY = height * 0.38d;
+        var originY = height * 0.50d;
         var projectedPoints = new Dictionary<int, LiveWireframeProjectedPoint>(rawPoints.Count);
 
         foreach (var (index, point) in rawPoints)
@@ -5908,7 +6135,8 @@ public partial class MainWindow : Window
         }
 
         lines.Add(FormatCompactFaceSignalLine(_currentFaceLandmarkMetrics));
-        lines.Add(FormatCompactHeadPoseLine(_currentHeadPoseEstimate));
+        lines.Add(FormatCompactFaceFrameGeometryLine(_currentFaceFrameGeometry));
+        lines.Add(FormatCompactReconstructionLaneLine());
         lines.Add(FormatCueLine(_currentFaceLandmarkCueAnalysis, _currentFaceLandmarkTrendAnalysis, _currentFaceAnalysis));
         lines.Add(FormatCompactAvatarLine());
         return lines;
@@ -5938,11 +6166,11 @@ public partial class MainWindow : Window
         return $"Eyes {FormatRatioPercent(metrics.AverageEyeOpeningRatio)} ({eyeLock} q{metrics.EyeMeasurementQualityPercent:0}%) | brow {FormatRatioPercent(metrics.AverageBrowHeightRatio)} ({browLock} q{metrics.BrowMeasurementQualityPercent:0}%) | mouth {FormatRatioPercent(metrics.MouthOpeningRatio)} ({mouthLock} q{metrics.MouthMeasurementQualityPercent:0}%) | jaw {FormatRatioPercent(metrics.JawDroopRatio)}{blink}{jawOpen}{artifact}";
     }
 
-    private static string FormatCompactHeadPoseLine(HeadPoseEstimate pose)
+    private static string FormatCompactFaceFrameGeometryLine(FaceFrameGeometry pose)
     {
         if (!pose.HasFace)
         {
-            return "Pose: waiting for face lock";
+            return "Face frame: waiting for face lock";
         }
 
         var distance = pose.ApparentDistanceUnits is double units
@@ -5956,29 +6184,47 @@ public partial class MainWindow : Window
         var fill = pose.FaceFillWidthPercent is double width && pose.FaceFillHeightPercent is double height
             ? $" | fill {width:0.#}% x {height:0.#}%"
             : "";
-        return $"Pose: X {pose.XHorizontalPercent:0.#}% | Y {pose.YVerticalPercent:0.#}% | {distance}{fill} | A/X {pose.ARotationAroundXDegrees:0.#} deg | B/Y {pose.BRotationAroundYDegrees:0.#} deg | C/Z {pose.CRotationAroundZDegrees:0.#} deg";
+        return $"Face frame: X {pose.XHorizontalPercent:0.#}% | Y {pose.YVerticalPercent:0.#}% | {distance}{fill} | MP A/X {pose.ARotationAroundXDegrees:0.#} deg | B/Y {pose.BRotationAroundYDegrees:0.#} deg | C/Z {pose.CRotationAroundZDegrees:0.#} deg";
+    }
+
+    private string FormatCompactReconstructionLaneLine()
+    {
+        var pending = Interlocked.CompareExchange(ref _threeDdfaOnnxReconstructionPending, 0, 0) == 1;
+        if (!_threeDdfaOnnxEnvironment.IsReady)
+        {
+            return "3DDFA avatar lane: waiting for install";
+        }
+
+        if (pending)
+        {
+            return "3DDFA avatar lane: reconstructing";
+        }
+
+        var response = _currentThreeDdfaOnnxResponse;
+        return response.Ok && response.HasFace
+            ? $"3DDFA avatar lane: dense {response.DenseVertexCount} | q{response.ReconstructionConfidencePercent:0}% | A/B/C {response.Pose.ARotationAroundXDegrees:0.#}/{response.Pose.BRotationAroundYDegrees:0.#}/{response.Pose.CRotationAroundZDegrees:0.#}"
+            : "3DDFA avatar lane: ready, waiting";
     }
 
     private string FormatCompactAvatarLine()
     {
-        var model = _currentPersonalFaceModelUpdate.Model;
-        var quality = _currentPersonalFaceCaptureQuality.ScorePercent > 0d
-            ? $"quality {_currentPersonalFaceCaptureQuality.Label} {_currentPersonalFaceCaptureQuality.ScorePercent:0}%"
+        var quality = _currentAvatarCaptureQuality.ScorePercent > 0d
+            ? $"quality {_currentAvatarCaptureQuality.Label} {_currentAvatarCaptureQuality.ScorePercent:0}%"
             : "quality waiting";
-        if (PersonalModelSubjectCheckBox.IsChecked != true)
+        if (AvatarSubjectCheckBox.IsChecked != true)
         {
             return $"Avatar: subject off | {quality}";
         }
 
         if (!_avatarLearningRequested)
         {
-            return $"Avatar: stopped | accepted {model.AcceptedSamples}/{model.ObservedSamples} | {quality}";
+            return $"Avatar: capture stopped | 3DDFA_V2 ONNX idle | {quality}";
         }
 
-        var state = _currentPersonalFaceModelUpdate.Accepted
-            ? "learning"
-            : $"waiting ({_currentPersonalFaceModelUpdate.RejectionKind})";
-        return $"Avatar: {state} | accepted {model.AcceptedSamples}/{model.ObservedSamples} | {quality}";
+        var captureState = _currentAvatarCaptureQuality.CanCollectMeasurements
+            ? "3D capture"
+            : $"waiting ({_currentAvatarCaptureQuality.Label})";
+        return $"Avatar: {captureState} | {FormatCompactReconstructionLaneLine()} | {quality}";
     }
 
     private static string FormatFaceReliabilityLine(FaceLockStabilityAnalysis stability)
@@ -5994,76 +6240,6 @@ public partial class MainWindow : Window
         }
 
         return $"Face reliability: {stability.Label} {stability.CompositeReliabilityPercent:0}% | continuity {stability.FaceContinuityPercent:0}% | eye {stability.EyeReliabilityPercent:0}% | mouth {stability.MouthReliabilityPercent:0}%";
-    }
-
-    private static string FormatPersonalFaceModelLine(
-        PersonalFaceModelUpdate update,
-        PersonalFaceMotionModel motionModel,
-        PersonalFaceCorpusReadiness readiness,
-        long measurementJournalSizeBytes)
-    {
-        var model = update.Model;
-        var subject = string.IsNullOrWhiteSpace(model.SubjectDisplayName)
-            ? "subject"
-            : model.SubjectDisplayName;
-        var storage = $"journal {FormatStorageSize(measurementJournalSizeBytes)} / 10 GB";
-        var motion = motionModel.ObservationCount > 0
-            ? $"motion {motionModel.UsableObservationCount} obs/{motionModel.MotionPairCount} pairs"
-            : "motion waiting";
-        var readinessLabel = readiness.AcceptedBaselineSamples > 0 || readiness.MotionUsableObservations > 0
-            ? $"readiness {readiness.OverallReadinessPercent:0}%"
-            : "readiness waiting";
-        var identity = update.IdentityAnalysis is { HasMeasurement: true } identityAnalysis
-            ? $"identity {identityAnalysis.ConfidencePercent:0}%"
-            : model.IdentitySignatureSamples > 0
-                ? $"identity {model.IdentitySignatureSamples} sig"
-                : "identity warming";
-        if (update.RejectionKind == PersonalFaceModelRejectionKind.SubjectNotConfirmed)
-        {
-            return $"Personal model ({subject}): subject gate off | accepted {model.AcceptedSamples}/{model.ObservedSamples} | {motion} | {identity} | {readinessLabel} | {storage}";
-        }
-
-        if (model.ObservedSamples <= 0)
-        {
-            return $"Personal model ({subject}): waiting | {motion} | {identity} | {readinessLabel} | {storage}";
-        }
-
-        var action = update.Accepted
-            ? "learning"
-            : $"paused ({update.RejectionKind})";
-        return $"Personal model ({subject}): {action} | accepted {model.AcceptedSamples}/{model.ObservedSamples} | weight {model.AcceptedSampleWeight:0.0} | {motion} | {identity} | {readinessLabel} | {storage}";
-    }
-
-    private static string FormatPersonalFaceCollectionAuditLine(PersonalFaceCollectionAudit audit)
-    {
-        if (audit.TotalFramesReviewed <= 0)
-        {
-            return "Collection audit: waiting for reviewed frames";
-        }
-
-        var issue = FormatCollectionAuditOverlayIssue(audit.TopCaptureQualityIssues.FirstOrDefault());
-        var issueLabel = string.IsNullOrWhiteSpace(issue)
-            ? ""
-            : $" | top issue {issue}";
-        return $"Collection audit: reviewed {audit.TotalFramesReviewed} | face {audit.FaceDetectionRate:P0} | collect {audit.CaptureQualityCollectableRate:P0} | avatar {audit.CaptureQualityAvatarGradeRate:P0}{issueLabel}";
-    }
-
-    private static string FormatCollectionAuditOverlayIssue(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return "";
-        }
-
-        var trimmed = value.Trim();
-        var countIndex = trimmed.LastIndexOf(" (", StringComparison.Ordinal);
-        if (countIndex > 0)
-        {
-            trimmed = trimmed[..countIndex];
-        }
-
-        const int MaxLength = 84;
-        return trimmed.Length <= MaxLength ? trimmed : $"{trimmed[..(MaxLength - 3)]}...";
     }
 
     private static string FormatStorageSize(long bytes)
@@ -6928,47 +7104,33 @@ public partial class MainWindow : Window
 
     private sealed record AvatarTrackingSanityState(string Detail, Color Accent);
 
-    private sealed record PersonalFaceReportSnapshot(
+    private sealed record AvatarReportSnapshot(
         string Folder,
-        PersonalFaceModel Model,
-        IReadOnlyList<PersonalFaceCollectionAuditObservation> CollectionAuditObservations,
-        PersonalFaceCaptureQualityAssessment CaptureQuality,
+        string SubjectId,
+        string SubjectDisplayName,
+        AvatarCaptureQualityAssessment CaptureQuality,
         bool SubjectConfirmed,
-        bool AvatarLearningRequested,
-        bool AvatarLearningActive,
-        string AvatarLearningStatus,
-        string AvatarLearningCorrection,
-        HeadPoseEstimate HeadPose,
+        bool AvatarCaptureRequested,
+        bool AvatarCaptureActive,
+        string AvatarCaptureStatus,
+        string AvatarCaptureCorrection,
+        FaceFrameGeometry FaceFrameGeometry,
         LastGoodFeatureMeshStabilityReport LastGoodFeatureMeshStability,
-        IReadOnlyList<LastGoodFeatureMeshSample> LastGoodFeatureMeshSamples);
+        IReadOnlyList<LastGoodFeatureMeshSample> LastGoodFeatureMeshSamples,
+        IReadOnlyList<LastGoodFeatureThreeDdfaSnapshot> LastGoodThreeDdfaSamples,
+        FaceReconstructionLaneStatus ReconstructionLane);
 
-    private sealed record PersonalFaceReportSaveResult(
-        string PersonalFaceModelPath,
-        string PersonalFaceMotionModelPath,
-        string PersonalFaceCorpusReadinessPath,
-        string PersonalFaceCollectionAuditPath,
-        string MeasurementFacePreviewPath,
-        string MeasurementAvatarTrainingPackagePath,
-        string MeasurementAvatarCapturePlanPath,
+    private sealed record AvatarReportSaveResult(
         string LastGoodFeatureMeshJsonPath,
         string LastGoodFeatureMeshHtmlPath,
-        string MeasurementAvatarSystemDashboardPath,
-        long MeasurementJournalBytes,
-        PersonalFaceMotionModel MotionModel,
-        PersonalFaceCorpusReadiness CorpusReadiness,
-        PersonalFaceCollectionAudit CollectionAudit,
-        MeasurementAvatarCapturePlan CapturePlan);
+        string LastGoodThreeDdfaJsonPath,
+        string LastGoodThreeDdfaHtmlPath,
+        string AvatarSystemDashboardPath,
+        string AvatarModelJsonPath,
+        string AvatarModelHtmlPath,
+        string AvatarModelObservationJsonPath);
 
-    private sealed record PersonalFaceAuditSnapshot(
-        PersonalFaceMotionModel MotionModel,
-        PersonalFaceCorpusReadiness Readiness);
-
-    private sealed class EpisodeMonitorSettings
-    {
-        public string OutputFolder { get; set; } = "";
-
-        public DateTime UpdatedAtUtc { get; set; }
-    }
+    private sealed record AvatarStartupSelection(string ProfileId, string NewDisplayName);
 
     private sealed class AlertBaselineFile
     {

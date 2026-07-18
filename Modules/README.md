@@ -44,9 +44,11 @@ Key submodules:
 - `Analysis`: backend-neutral cue scoring, contour metrics, reconstruction, and trend logic.
 - `OpenCv`: OpenCV/YuNet/LBF/aperture implementations.
 - `MediaPipe`: MediaPipe Face Landmarker model metadata, Python sidecar bridge, and dense-landmark mapping.
+- `Onnx`: ONNX-backed avatar reconstruction adapters. The current adapter is a 3DDFA_V2 Python sidecar that returns dense reconstruction, pose, and coefficient evidence without blocking live tracking.
 - `Pipeline`: composite tracker that chooses and fuses vision backends.
-- `Personalization`: subject-gated rolling personal face model, live capture-quality scoring, compact measurement journal, long-term baseline distributions, measurement-only facial motion distributions, and corpus readiness guidance for future avatar/assistant reuse.
-- `Reconstruction`: backend-neutral 3D/avatar reconstruction job/result contracts, the measurement-only preview artifact, and a Deep3D/PyTorch sidecar slot.
+- `Personalization`: avatar-user registry, subject-gate helpers, and avatar capture-quality scoring.
+- `Reconstruction`: backend-neutral 3D/avatar reconstruction job/result contracts, two-lane tracking/reconstruction status reports, Avatar System reports, separate MediaPipe Last 5 and 3DDFA Last 5 review pages, bounded persistent Avatar Model observation/model stores, and the active 3DDFA_V2 ONNX dense reconstruction work-item spec.
+- `Deprecated`: retired module experiments kept for reference outside the active app build, including the old rolling measurement-learning model, old measurement preview/package/plan path, old evaluator/smoke/verifier tooling, and old Deep3D/PyTorch sidecar contract.
 
 See `Vision/README.md`.
 
@@ -103,6 +105,7 @@ UI -> Recording
 
 Episodes -> Vision.Analysis
 Vision.Pipeline -> Vision.OpenCv / Vision.MediaPipe / Vision.Common
+Vision.Onnx -> external 3DDFA_V2 Python sidecar
 Vision.Analysis -> Vision.Common
 Vision.Reconstruction -> Vision.Personalization
 Webcam.Pipeline -> Webcam.MediaFoundation / Webcam.Ffmpeg / Webcam.Common

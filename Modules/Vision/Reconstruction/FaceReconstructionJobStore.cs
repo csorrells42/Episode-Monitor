@@ -11,7 +11,7 @@ public sealed class FaceReconstructionJobStore
         WriteIndented = true
     };
 
-    public string Write(string folder, FaceReconstructionWorkItem workItem, string fileName = Deep3DFaceReconstructionSidecarSpec.WorkItemFileName)
+    public string Write(string folder, FaceReconstructionWorkItem workItem, string fileName = ThreeDdfaOnnxReconstructionSpec.WorkItemFileName)
     {
         Directory.CreateDirectory(folder);
         var path = Path.Combine(folder, fileName);

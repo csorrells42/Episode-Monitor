@@ -14,17 +14,32 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="dependencies\**\*">
+    <Content Include="dependencies\**\*" Exclude="dependencies\vision\3ddfa-onnx\3DDFA_V2\.git\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\.github\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\docs\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\examples\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\**\__pycache__\**\*;dependencies\vision\3ddfa-onnx\3DDFA_V2\demo*.py;dependencies\vision\3ddfa-onnx\3DDFA_V2\demo*.ipynb;dependencies\vision\3ddfa-onnx\3DDFA_V2\gradiodemo.py;dependencies\vision\3ddfa-onnx\3DDFA_V2\latency.py;dependencies\vision\3ddfa-onnx\3DDFA_V2\speed_cpu.py">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
+    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\.git\**\*" />
+    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\.github\**\*" />
+    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\docs\**\*" />
+    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\examples\**\*" />
+    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\**\__pycache__\**\*" />
+    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\demo*.py" />
+    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\demo*.ipynb" />
+    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\gradiodemo.py" />
+    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\latency.py" />
+    <Content Remove="dependencies\vision\3ddfa-onnx\3DDFA_V2\speed_cpu.py" />
     <Content Include="Modules\Vision\MediaPipe\Sidecar\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Include="Modules\Vision\Onnx\Sidecar\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="Modules\Deprecated\**\*.cs" />
     <Compile Remove="tools\**\*.cs" />
   </ItemGroup>
 
@@ -32,6 +47,7 @@
     <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260602" />
     <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260602" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
     <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
     <PackageReference Include="Vortice.Direct3D12" Version="3.8.3" />
   </ItemGroup>

@@ -37,6 +37,11 @@ public sealed class LastGoodFeatureMeshStore
 
     private static LastGoodFeatureMeshReport PrepareReport(LastGoodFeatureMeshReport report)
     {
+        var samples = report.Samples
+            .TakeLast(5)
+            .Select(RemoveThreeDdfaPayload)
+            .ToList();
+
         return new LastGoodFeatureMeshReport
         {
             SchemaVersion = report.SchemaVersion,
@@ -44,22 +49,35 @@ public sealed class LastGoodFeatureMeshStore
             SubjectId = report.SubjectId,
             SubjectDisplayName = report.SubjectDisplayName,
             StoragePolicy = report.StoragePolicy,
-            HeadLockedStability = LastGoodFeatureMeshStabilityAnalyzer.Analyze(report.Samples),
-            Samples = report.Samples
+            AvatarModelProgressHtmlPath = report.AvatarModelProgressHtmlPath,
+            HeadLockedStability = LastGoodFeatureMeshStabilityAnalyzer.Analyze(samples),
+            ReconstructionLane = report.ReconstructionLane,
+            Samples = samples
         };
+    }
+
+    private static LastGoodFeatureMeshSample RemoveThreeDdfaPayload(LastGoodFeatureMeshSample sample)
+    {
+        var json = JsonSerializer.Serialize(sample, JsonOptions);
+        var copy = JsonSerializer.Deserialize<LastGoodFeatureMeshSample>(json, JsonOptions) ?? sample;
+        copy.ThreeDdfaFullResolution = null;
+        return copy;
     }
 
     private static string BuildHtml(LastGoodFeatureMeshReport report)
     {
         var sceneJson = JsonSerializer.Serialize(report, JsonOptions);
         var sampleRows = report.Samples.Count == 0
-            ? "<tr><td colspan=\"5\" class=\"muted\">No good dense mesh samples have been captured yet.</td></tr>"
+            ? "<tr><td colspan=\"5\" class=\"muted\">No good MediaPipe feature-lock samples have been captured yet.</td></tr>"
             : string.Concat(report.Samples.Select((sample, index) =>
-                $"<tr data-sample-row=\"{index}\"><td>{H(sample.CapturedAtUtc.ToLocalTime().ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture))}</td><td>{sample.PointCount.ToString(CultureInfo.InvariantCulture)}</td><td>{sample.OverallQualityPercent:0.#}%</td><td>{sample.HeadPitchDegrees:0.#}/{sample.HeadYawDegrees:0.#}/{sample.HeadRollDegrees:0.#}</td><td>{H(sample.Source)}</td></tr>"));
+                $"<tr data-sample-row=\"{index}\"><td>{H(sample.CapturedAtUtc.ToLocalTime().ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture))}</td><td>{FormatSamplePointCounts(sample)}</td><td>{sample.OverallQualityPercent:0.#}%</td><td>{sample.HeadPitchDegrees:0.#}/{sample.HeadYawDegrees:0.#}/{sample.HeadRollDegrees:0.#}</td><td>{H(sample.Source)}</td></tr>"));
         var stabilityRows = BuildStabilityRows(report.HeadLockedStability);
         var stabilityFindings = report.HeadLockedStability.Findings.Count == 0
             ? "<li>No head-locked stability findings.</li>"
             : string.Concat(report.HeadLockedStability.Findings.Select(finding => $"<li>{H(finding)}</li>"));
+        var avatarModelProgressLink = string.IsNullOrWhiteSpace(report.AvatarModelProgressHtmlPath)
+            ? "<p class=\"muted\">Avatar Model Progress will appear after the avatar output folder is initialized.</p>"
+            : $"<p><a href=\"{H(report.AvatarModelProgressHtmlPath)}\">Open Avatar Model Progress</a></p>";
 
         return $$"""
 <!doctype html>
@@ -67,8 +85,7 @@ public sealed class LastGoodFeatureMeshStore
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="10">
-<title>Last 10 Good Features</title>
+<title>MediaPipe Last 5 Feature Locks</title>
 <style>
 :root {
   color-scheme: dark;
@@ -79,6 +96,7 @@ public sealed class LastGoodFeatureMeshStore
   --muted: #9db7c9;
   --point: #6f8da3;
   --surface: #2f6c8f;
+  --three-ddfa: #66d9ff;
   --face: #65c8ff;
   --eye: #8ff2c5;
   --brow: #c9f7a3;
@@ -158,6 +176,14 @@ button[aria-pressed="true"] {
   background: #1c405c;
   border-color: #65c8ff;
 }
+button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+button[data-refresh-paused="true"] {
+  background: #4a2630;
+  border-color: #ff9fbd;
+}
 .sample-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 table { width: 100%; border-collapse: collapse; }
 td, th { border-bottom: 1px solid #1c3042; padding: 6px 4px; text-align: left; vertical-align: top; }
@@ -171,22 +197,24 @@ tr[data-active="true"] { background: #102033; }
 </head>
 <body>
 <main>
-  <section class="stage" aria-label="Last 10 good dense feature meshes">
+  <section class="stage" aria-label="MediaPipe last five feature-lock meshes">
     <div class="viewer">
       <canvas id="mesh3d" aria-label="Interactive 3D dense landmark points" title="Drag to rotate. Use the mouse wheel to zoom. Double-click to reset."></canvas>
-      <div class="overlay" id="sampleOverlay">Waiting for dense mesh samples.</div>
+      <div class="overlay" id="sampleOverlay">Waiting for MediaPipe feature-lock samples.</div>
     </div>
     <div class="view-controls" aria-label="Mesh display controls">
+      <button type="button" id="toggleAutoRefresh" aria-pressed="true">Pause Updates</button>
+      <button type="button" id="selectMediaPipeView" aria-pressed="false">Show MediaPipe Wireframe</button>
       <button type="button" id="togglePoints" aria-pressed="true">Points</button>
       <button type="button" id="toggleSurface" aria-pressed="true">Wireframe</button>
       <button type="button" id="toggleFeatures" aria-pressed="true">Features</button>
-      <button type="button" id="toggleGhosts" aria-pressed="false">Ghost Last 10</button>
+      <button type="button" id="toggleGhosts" aria-pressed="false">Ghost Last 5</button>
       <button type="button" id="toggleHeadLock" aria-pressed="true">Head Lock</button>
       <button type="button" id="toggleAxes" aria-pressed="true">Frame Axes</button>
     </div>
     <div class="legend">
       <span><span class="swatch" style="background:var(--point)"></span>all mesh points</span>
-      <span><span class="swatch" style="background:var(--surface)"></span>curated facial scaffold</span>
+      <span><span class="swatch" style="background:var(--surface)"></span>MediaPipe face mesh</span>
       <span><span class="swatch" style="background:var(--face)"></span>face</span>
       <span><span class="swatch" style="background:var(--eye)"></span>eyes</span>
       <span><span class="swatch" style="background:var(--brow)"></span>brows</span>
@@ -199,12 +227,21 @@ tr[data-active="true"] { background: #102033; }
     </div>
   </section>
   <aside class="panel">
-    <h1>Last 10 Good Features</h1>
-    <div class="muted">Auto-refreshes every 10 seconds. Last updated {{H(report.CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture))}}.</div>
+    <h1>MediaPipe Last 5 Feature Locks</h1>
+    <div class="muted" id="refreshStatus">Auto-refreshes every 30 seconds. Use Pause Updates to freeze this viewer for review. Last updated {{H(report.CreatedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture))}}.</div>
     <p>{{H(report.StoragePolicy)}}</p>
+    <h2>Review Links</h2>
+    {{avatarModelProgressLink}}
+    <h2>Two-Lane Tracking</h2>
+    <table>
+      <tr><th>Fast tracking lane</th><td>{{H(report.ReconstructionLane.FastTrackingStatus)}}</td></tr>
+      <tr><th>Avatar reconstruction lane</th><td>{{H(report.ReconstructionLane.AvatarReconstructionStatus)}}</td></tr>
+      <tr><th>Trust decision</th><td>{{H(report.ReconstructionLane.TrustDecision)}}</td></tr>
+      <tr><th>Learning impact</th><td>{{H(report.ReconstructionLane.LearningImpact)}}</td></tr>
+    </table>
     <table>
       <tr><th>Subject</th><td>{{H(report.SubjectDisplayName)}} ({{H(report.SubjectId)}})</td></tr>
-      <tr><th>Samples</th><td>{{report.Samples.Count.ToString(CultureInfo.InvariantCulture)}} / 10</td></tr>
+      <tr><th>Samples</th><td>{{report.Samples.Count.ToString(CultureInfo.InvariantCulture)}} / 5</td></tr>
     </table>
     <h2>Head-Locked Stability</h2>
     <table>
@@ -235,7 +272,7 @@ tr[data-active="true"] { background: #102033; }
     <h2>Z Distance Findings</h2>
     <ul>{{BuildFindings(report.HeadLockedStability.ZFindings, "No Z distance findings.")}}</ul>
     <div class="sample-buttons" id="sampleButtons"></div>
-    <h2>Samples</h2>
+    <h2>MediaPipe Samples</h2>
     <table>
       <tr><th>Time</th><th>Points</th><th>Quality</th><th>A/B/C</th><th>Source</th></tr>
       {{sampleRows}}
@@ -253,18 +290,23 @@ tr[data-active="true"] { background: #102033; }
   const overlay = document.getElementById('sampleOverlay');
   const details = document.getElementById('sampleDetails');
   const buttons = document.getElementById('sampleButtons');
+  const selectThreeDdfaView = document.getElementById('selectThreeDdfaView');
+  const selectMediaPipeView = document.getElementById('selectMediaPipeView');
   const togglePoints = document.getElementById('togglePoints');
   const toggleSurface = document.getElementById('toggleSurface');
   const toggleFeatures = document.getElementById('toggleFeatures');
   const toggleGhosts = document.getElementById('toggleGhosts');
   const toggleHeadLock = document.getElementById('toggleHeadLock');
   const toggleAxes = document.getElementById('toggleAxes');
+  const toggleAutoRefresh = document.getElementById('toggleAutoRefresh');
+  const refreshStatus = document.getElementById('refreshStatus');
   const ctx = canvas?.getContext('2d');
   if (!canvas || !ctx) return;
 
   const colors = {
     point: '#6f8da3',
     surface: '#2f6c8f',
+    threeDdfa: '#66d9ff',
     face: '#65c8ff',
     eye: '#8ff2c5',
     brow: '#c9f7a3',
@@ -275,13 +317,17 @@ tr[data-active="true"] { background: #102033; }
     cheek: '#c7a6ff',
     forehead: '#9db7c9'
   };
-  const defaultView = { yaw: -0.42, pitch: -0.12, zoom: 1 };
+  const defaultView = { yaw: -0.42, pitch: -0.12, zoom: 0.56 };
   let rotation = { ...defaultView };
   const view = { points: true, surface: true, features: true, ghosts: false, headLock: true, axes: true };
-  let activeIndex = samples.length > 0 ? samples.length - 1 : -1;
+  let activeIndex = findDefaultSampleIndex();
+  let activeMeshMode = preferredMeshModeForSample(samples[activeIndex]);
   let dragging = false;
   let last = null;
+  let refreshTimer = null;
 
+  bindAutoRefresh();
+  bindMeshModeButtons();
   bindToggle(togglePoints, 'points');
   bindToggle(toggleSurface, 'surface');
   bindToggle(toggleFeatures, 'features');
@@ -296,6 +342,8 @@ tr[data-active="true"] { background: #102033; }
       button.textContent = `#${index + 1} ${formatTime(sample.capturedAtUtc || sample.CapturedAtUtc)}`;
       button.addEventListener('click', () => {
         activeIndex = index;
+        activeMeshMode = preferredMeshModeForSample(samples[activeIndex]);
+        syncMeshModeButtons();
         draw();
       });
       buttons.appendChild(button);
@@ -305,6 +353,8 @@ tr[data-active="true"] { background: #102033; }
   document.querySelectorAll('[data-sample-row]').forEach(row => {
     row.addEventListener('click', () => {
       activeIndex = Number(row.getAttribute('data-sample-row'));
+      activeMeshMode = preferredMeshModeForSample(samples[activeIndex]);
+      syncMeshModeButtons();
       draw();
     });
   });
@@ -337,6 +387,36 @@ tr[data-active="true"] { background: #102033; }
   new ResizeObserver(resize).observe(canvas);
   resize();
 
+  function bindAutoRefresh() {
+    if (!toggleAutoRefresh) return;
+    const key = 'episodeMonitorLast10AutoRefreshPaused';
+    const isPaused = () => {
+      try { return window.localStorage?.getItem(key) === 'true'; }
+      catch { return false; }
+    };
+    const setPaused = paused => {
+      try { window.localStorage?.setItem(key, paused ? 'true' : 'false'); }
+      catch { /* local file storage may be unavailable; the button still works for this page. */ }
+      toggleAutoRefresh.textContent = paused ? 'Resume Updates' : 'Pause Updates';
+      toggleAutoRefresh.setAttribute('aria-pressed', paused ? 'false' : 'true');
+      toggleAutoRefresh.dataset.refreshPaused = paused ? 'true' : 'false';
+      if (refreshStatus) {
+        refreshStatus.textContent = paused
+          ? 'Updates paused. This viewer will not reload until you click Resume Updates.'
+          : 'Auto-refreshes every 30 seconds. Use Pause Updates to freeze this viewer for review.';
+      }
+      if (refreshTimer) {
+        clearTimeout(refreshTimer);
+        refreshTimer = null;
+      }
+      if (!paused) {
+        refreshTimer = setTimeout(() => window.location.reload(), 30000);
+      }
+    };
+    toggleAutoRefresh.addEventListener('click', () => setPaused(!isPaused()));
+    setPaused(isPaused());
+  }
+
   function bindToggle(button, key) {
     if (!button) return;
     button.addEventListener('click', () => {
@@ -344,6 +424,59 @@ tr[data-active="true"] { background: #102033; }
       button.setAttribute('aria-pressed', view[key] ? 'true' : 'false');
       draw();
     });
+  }
+
+  function bindMeshModeButtons() {
+    selectThreeDdfaView?.addEventListener('click', () => setMeshMode('3ddfa'));
+    selectMediaPipeView?.addEventListener('click', () => setMeshMode('mediapipe'));
+    syncMeshModeButtons();
+  }
+
+  function setMeshMode(mode) {
+    if (mode === '3ddfa' && !sampleHasThreeDdfa(samples[activeIndex])) {
+      return;
+    }
+
+    activeMeshMode = mode;
+    syncMeshModeButtons();
+    draw();
+  }
+
+  function syncMeshModeButtons() {
+    const hasThreeDdfa = sampleHasThreeDdfa(samples[activeIndex]);
+    if (activeMeshMode === '3ddfa' && !hasThreeDdfa) {
+      activeMeshMode = 'mediapipe';
+    }
+
+    if (selectThreeDdfaView) {
+      selectThreeDdfaView.disabled = !hasThreeDdfa;
+      selectThreeDdfaView.setAttribute('aria-pressed', activeMeshMode === '3ddfa' ? 'true' : 'false');
+      selectThreeDdfaView.title = hasThreeDdfa ? 'Show the 3DDFA full-resolution dense mesh for this sample.' : '3DDFA full-resolution mesh has not attached to this sample yet.';
+    }
+
+    if (selectMediaPipeView) {
+      selectMediaPipeView.setAttribute('aria-pressed', activeMeshMode === 'mediapipe' ? 'true' : 'false');
+    }
+  }
+
+  function findDefaultSampleIndex() {
+    for (let index = samples.length - 1; index >= 0; index--) {
+      if (sampleHasThreeDdfa(samples[index])) {
+        return index;
+      }
+    }
+
+    return samples.length > 0 ? samples.length - 1 : -1;
+  }
+
+  function preferredMeshModeForSample(sample) {
+    return sampleHasThreeDdfa(sample) ? '3ddfa' : 'mediapipe';
+  }
+
+  function sampleHasThreeDdfa(sample) {
+    const threeDdfa = getThreeDdfa(sample);
+    const vertices = threeDdfa ? (threeDdfa.vertices || threeDdfa.Vertices || []) : [];
+    return vertices.length > 0;
   }
 
   function resize() {
@@ -355,6 +488,36 @@ tr[data-active="true"] { background: #102033; }
     canvas.height = Math.round(height * scale);
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
     draw();
+  }
+
+  function chooseMesh(sample) {
+    const threeDdfa = sample.threeDdfaFullResolution || sample.ThreeDdfaFullResolution || null;
+    const vertices = threeDdfa ? (threeDdfa.vertices || threeDdfa.Vertices || []) : [];
+    if (activeMeshMode === '3ddfa' && vertices.length > 0) {
+      const edges = threeDdfa.topologyEdges || threeDdfa.TopologyEdges || [];
+      const denseCount = threeDdfa.denseVertexCount ?? threeDdfa.DenseVertexCount ?? vertices.length;
+      return {
+        source: '3ddfa',
+        label: `3DDFA full-res dense mesh (${denseCount} vertices)`,
+        points: vertices,
+        edges,
+        groups: [],
+        snapshot: threeDdfa,
+        headLockSupported: false,
+        warning: ''
+      };
+    }
+
+    return {
+      source: 'mediapipe',
+      label: sample.denseMeshTopology || sample.DenseMeshTopology || 'MediaPipe dense mesh',
+      points: sample.points || sample.Points || [],
+      edges: sample.wireframeEdges || sample.WireframeEdges || [],
+      groups: sample.featureGroups || sample.FeatureGroups || [],
+      snapshot: null,
+      headLockSupported: true,
+      warning: activeMeshMode === '3ddfa' ? '3DDFA full mesh is not available for this selected sample; showing MediaPipe wireframe instead' : ''
+    };
   }
 
   function draw() {
@@ -369,9 +532,10 @@ tr[data-active="true"] { background: #102033; }
     if (buttons) {
       [...buttons.children].forEach((button, index) => button.setAttribute('aria-pressed', index === activeIndex ? 'true' : 'false'));
     }
+    syncMeshModeButtons();
 
     if (!sample) {
-      overlay.textContent = 'Waiting for dense mesh samples with good eye and mouth feature lock.';
+      overlay.textContent = 'Waiting for MediaPipe feature-lock samples with good eye and mouth feature lock.';
       if (details) details.innerHTML = '<tr><td class="muted">No sample selected.</td></tr>';
       return;
     }
@@ -380,10 +544,11 @@ tr[data-active="true"] { background: #102033; }
       drawGhostSamples(rect, activeIndex);
     }
 
-    const points = sample.points || sample.Points || [];
-    const groups = sample.featureGroups || sample.FeatureGroups || [];
-    const edges = sample.wireframeEdges || sample.WireframeEdges || [];
-    const normalizedSample = normalize(points, sample);
+    const mesh = chooseMesh(sample);
+    const points = mesh.points;
+    const groups = mesh.groups;
+    const edges = mesh.edges;
+    const normalizedSample = normalize(points, sample, mesh);
     const normalized = normalizedSample.points;
     const byIndex = new Map(normalized.map(point => [point.index, point]));
     const featureIndexes = new Set(groups.flatMap(group => group.landmarkIndices || group.LandmarkIndices || []));
@@ -401,8 +566,8 @@ tr[data-active="true"] { background: #102033; }
 
       for (const item of projected) {
         ctx.globalAlpha = item.role === 'feature' ? 0.62 : 0.34;
-        ctx.fillStyle = item.role === 'feature' ? '#dcefff' : colors.point;
-        const radius = item.role === 'feature' ? 2.0 : 1.25;
+        ctx.fillStyle = mesh.source === '3ddfa' ? colors.threeDdfa : item.role === 'feature' ? '#dcefff' : colors.point;
+        const radius = mesh.source === '3ddfa' ? 0.85 : item.role === 'feature' ? 2.0 : 1.25;
         ctx.beginPath();
         ctx.arc(item.projected.x, item.projected.y, radius * item.projected.scale, 0, Math.PI * 2);
         ctx.fill();
@@ -445,7 +610,7 @@ tr[data-active="true"] { background: #102033; }
 
     ctx.globalAlpha = 1;
     const stability = report.headLockedStability || report.HeadLockedStability || {};
-    overlay.innerHTML = `<strong>${escapeHtml(sample.denseMeshTopology || sample.DenseMeshTopology || 'dense mesh')}</strong><br>${formatTime(sample.capturedAtUtc || sample.CapturedAtUtc)} | ${points.length} points | ${edges.length} edges<br>quality ${formatNumber(sample.overallQualityPercent ?? sample.OverallQualityPercent)}% | eyes ${formatNumber(sample.eyeQualityPercent ?? sample.EyeQualityPercent)}% | brows ${formatNumber(sample.browQualityPercent ?? sample.BrowQualityPercent)}% | mouth ${formatNumber(sample.mouthQualityPercent ?? sample.MouthQualityPercent)}%<br>X/Y ${formatNumber(sample.xHorizontalPercent ?? sample.XHorizontalPercent)}% / ${formatNumber(sample.yVerticalPercent ?? sample.YVerticalPercent)}% | A/B/C ${formatNumber(sample.headPitchDegrees ?? sample.HeadPitchDegrees)}/${formatNumber(sample.headYawDegrees ?? sample.HeadYawDegrees)}/${formatNumber(sample.headRollDegrees ?? sample.HeadRollDegrees)}<br>Z ${formatApparentZ(sample)} | q ${formatNumber(sample.zConfidencePercent ?? sample.ZConfidencePercent)}% | ${escapeHtml(sample.rotationSource || sample.RotationSource || 'pose source waiting')}<br>B ${escapeHtml(stability.yawStatus || stability.YawStatus || 'waiting')} | A ${escapeHtml(stability.aStatus || stability.AStatus || 'waiting')} | C ${escapeHtml(stability.cStatus || stability.CStatus || 'waiting')}<br>Z lock ${escapeHtml(stability.zStatus || stability.ZStatus || 'waiting')} | scale range ${formatNumber(stability.zFaceScaleRangePercent ?? stability.ZFaceScaleRangePercent)}%<br>viewer ${escapeHtml(normalizedSample.mode)}${normalizedSample.warning ? ` | ${escapeHtml(normalizedSample.warning)}` : ''}`;
+    overlay.innerHTML = `<strong>${escapeHtml(mesh.label)}</strong><br>${formatTime(sample.capturedAtUtc || sample.CapturedAtUtc)} | ${points.length} points | ${edges.length} edges<br>quality ${formatNumber(sample.overallQualityPercent ?? sample.OverallQualityPercent)}% | eyes ${formatNumber(sample.eyeQualityPercent ?? sample.EyeQualityPercent)}% | brows ${formatNumber(sample.browQualityPercent ?? sample.BrowQualityPercent)}% | mouth ${formatNumber(sample.mouthQualityPercent ?? sample.MouthQualityPercent)}%<br>X/Y ${formatNumber(sample.xHorizontalPercent ?? sample.XHorizontalPercent)}% / ${formatNumber(sample.yVerticalPercent ?? sample.YVerticalPercent)}% | selected A/B/C ${formatNumber(sample.headPitchDegrees ?? sample.HeadPitchDegrees)}/${formatNumber(sample.headYawDegrees ?? sample.HeadYawDegrees)}/${formatNumber(sample.headRollDegrees ?? sample.HeadRollDegrees)}<br>Z ${formatApparentZ(sample)} | q ${formatNumber(sample.zConfidencePercent ?? sample.ZConfidencePercent)}% | ${escapeHtml(sample.rotationSource || sample.RotationSource || 'pose source waiting')}<br>B ${escapeHtml(stability.yawStatus || stability.YawStatus || 'waiting')} | A ${escapeHtml(stability.aStatus || stability.AStatus || 'waiting')} | C ${escapeHtml(stability.cStatus || stability.CStatus || 'waiting')}<br>Z lock ${escapeHtml(stability.zStatus || stability.ZStatus || 'waiting')} | scale range ${formatNumber(stability.zFaceScaleRangePercent ?? stability.ZFaceScaleRangePercent)}%<br>viewer ${escapeHtml(normalizedSample.mode)}${normalizedSample.warning ? ` | ${escapeHtml(normalizedSample.warning)}` : ''}${mesh.warning ? `<br>${escapeHtml(mesh.warning)}` : ''}`;
     if (details) {
       const anchorSummary = summarizeAnchors(normalizedSample.points, groups);
       details.innerHTML = `
@@ -458,7 +623,7 @@ tr[data-active="true"] { background: #102033; }
         <tr><th>Reliability</th><td>face ${formatNumber(sample.faceReliabilityPercent ?? sample.FaceReliabilityPercent)}%, continuity ${formatNumber(sample.faceContinuityPercent ?? sample.FaceContinuityPercent)}%, eyes ${formatNumber(sample.eyeReliabilityPercent ?? sample.EyeReliabilityPercent)}%, mouth ${formatNumber(sample.mouthReliabilityPercent ?? sample.MouthReliabilityPercent)}%</td></tr>
         <tr><th>Brow tracking</th><td>height ${formatRatio(sample.averageBrowHeightRatio ?? sample.AverageBrowHeightRatio)}, left/right ${formatRatio(sample.leftBrowHeightRatio ?? sample.LeftBrowHeightRatio)} / ${formatRatio(sample.rightBrowHeightRatio ?? sample.RightBrowHeightRatio)}, asymmetry ${formatNumber(sample.browAsymmetryPercent ?? sample.BrowAsymmetryPercent)}%, q ${formatNumber(sample.browQualityPercent ?? sample.BrowQualityPercent)}%</td></tr>
         <tr><th>Artifact flags</th><td>one-eye artifact ${formatBool(sample.possibleOneEyeArtifact ?? sample.PossibleOneEyeArtifact)}, eye reconstructed ${formatBool((sample.leftEyeReconstructed ?? sample.LeftEyeReconstructed) || (sample.rightEyeReconstructed ?? sample.RightEyeReconstructed))}, mouth reconstructed ${formatBool(sample.mouthReconstructed ?? sample.MouthReconstructed)}, eye suppressed ${formatBool(sample.eyeArtifactSuppressed ?? sample.EyeArtifactSuppressed)}</td></tr>
-        <tr><th>Wireframe</th><td>${edges.filter(isSurfaceEdge).length} facial scaffold surface edges, ${edges.filter(edge => !isSurfaceEdge(edge)).length} feature edges</td></tr>
+        <tr><th>Wireframe</th><td>${escapeHtml(mesh.label)}: ${edges.filter(isSurfaceEdge).length} surface edges, ${edges.filter(edge => !isSurfaceEdge(edge)).length} feature edges</td></tr>
         <tr><th>Feature groups</th><td>${groups.map(group => escapeHtml(group.label || group.Label || group.id || group.Id)).join(', ')}</td></tr>`;
     }
   }
@@ -486,11 +651,12 @@ tr[data-active="true"] { background: #102033; }
 
     for (const item of projectedEdges) {
       const role = item.edge.role || item.edge.Role || 'surface';
+      const source = item.edge.source || item.edge.Source || '';
       const confidence = item.edge.confidencePercent ?? item.edge.ConfidencePercent ?? 70;
       ctx.save();
       ctx.globalAlpha = Math.max(0.04, Math.min(0.9, confidence / 100 * alphaScale));
-      ctx.strokeStyle = colors[role] || colors.surface;
-      ctx.lineWidth = Math.max(0.45, (role === 'surface' ? 0.75 : 1.4) * widthScale);
+      ctx.strokeStyle = source === '3ddfa-full-resolution-topology' ? colors.threeDdfa : colors[role] || colors.surface;
+      ctx.lineWidth = Math.max(0.35, (source === '3ddfa-full-resolution-topology' ? 0.42 : role === 'surface' ? 0.75 : 1.4) * widthScale);
       ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(item.a.x, item.a.y);
@@ -528,10 +694,10 @@ tr[data-active="true"] { background: #102033; }
   function isSurfaceEdge(edge) {
     const role = edge.role || edge.Role || '';
     const source = edge.source || edge.Source || '';
-    return role === 'surface' || source === 'curated-facial-scaffold' || source === 'adaptive-local-neighbors' || source === 'adaptive-delaunay';
+    return role === 'surface' || source === 'mediapipe-face-tessellation' || source === 'curated-facial-scaffold' || source === 'adaptive-local-neighbors' || source === 'adaptive-delaunay';
   }
 
-  function normalize(points, sample) {
+  function normalize(points, sample, mesh) {
     const raw = points.map(point => ({
       index: point.index ?? point.Index,
       x: point.x ?? point.X,
@@ -539,30 +705,45 @@ tr[data-active="true"] { background: #102033; }
       z: point.z ?? point.Z
     })).filter(point => Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z));
     if (raw.length === 0) return { points: [], mode: 'waiting for mesh points', frame: null, warning: 'no usable points' };
-    if (view.headLock) {
+    if (view.headLock && mesh?.headLockSupported !== false) {
       const headLocked = normalizeHeadLocked(raw, sample);
       if (headLocked) {
         return headLocked;
       }
     }
 
+    if (mesh?.source === '3ddfa') {
+      return normalizeByBounds(raw, '3DDFA full-res face-bounds view', '3DDFA vertices are already reconstructed face-space; MediaPipe head-lock anchors are not used');
+    }
+
     return normalizeByBounds(raw, view.headLock ? 'camera-bounds fallback' : 'camera-bounds view', view.headLock ? 'head anchors unavailable' : '');
   }
 
   function normalizeByBounds(raw, mode, warning) {
-    const minX = Math.min(...raw.map(point => point.x));
-    const maxX = Math.max(...raw.map(point => point.x));
-    const minY = Math.min(...raw.map(point => point.y));
-    const maxY = Math.max(...raw.map(point => point.y));
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minY = Number.POSITIVE_INFINITY;
+    let maxY = Number.NEGATIVE_INFINITY;
+    let minZ = Number.POSITIVE_INFINITY;
+    let maxZ = Number.NEGATIVE_INFINITY;
+    for (const point of raw) {
+      if (point.x < minX) minX = point.x;
+      if (point.x > maxX) maxX = point.x;
+      if (point.y < minY) minY = point.y;
+      if (point.y > maxY) maxY = point.y;
+      if (point.z < minZ) minZ = point.z;
+      if (point.z > maxZ) maxZ = point.z;
+    }
     const centerX = (minX + maxX) / 2;
     const centerY = (minY + maxY) / 2;
+    const centerZ = (minZ + maxZ) / 2;
     const scale = 1 / Math.max(0.001, maxX - minX, maxY - minY);
     return {
       points: raw.map(point => ({
         index: point.index,
         x: (point.x - centerX) * scale,
         y: (point.y - centerY) * scale,
-        z: point.z * scale * 0.62
+        z: (point.z - centerZ) * scale * 0.62
       })),
       mode,
       frame: null,
@@ -706,7 +887,7 @@ tr[data-active="true"] { background: #102033; }
     const y1 = point.y * cosP - z1 * sinP;
     const z2 = point.y * sinP + z1 * cosP;
     const depth = 1.6 + z2;
-    const zoom = Math.min(rect.width, rect.height) * 0.78 * rotation.zoom / Math.max(0.35, depth);
+    const zoom = Math.min(rect.width, rect.height) * 0.62 * rotation.zoom / Math.max(0.35, depth);
     return {
       x: rect.width * 0.5 + x1 * zoom,
       y: rect.height * 0.52 + y1 * zoom,
@@ -749,12 +930,50 @@ tr[data-active="true"] { background: #102033; }
     return Number.isFinite(Number(value)) ? Number(value).toFixed(1).replace(/\.0$/, '') : '--';
   }
 
+  function formatInteger(value) {
+    return Number.isFinite(Number(value)) ? Math.round(Number(value)).toLocaleString() : '--';
+  }
+
   function formatBool(value) {
     return value ? 'yes' : 'no';
   }
 
   function formatRatio(value) {
     return Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(1).replace(/\.0$/, '')}%` : '--';
+  }
+
+  function getThreeDdfa(sample) {
+    if (!sample) {
+      return null;
+    }
+
+    return sample.threeDdfaFullResolution || sample.ThreeDdfaFullResolution || null;
+  }
+
+  function formatCompactThreeDdfa(sample) {
+    const threeDdfa = getThreeDdfa(sample);
+    if (!threeDdfa) {
+      return '3DDFA full-res waiting for an async reconstruction match';
+    }
+
+    return `3DDFA full-res A/B/C ${formatNumber(threeDdfa.aRotationAroundXDegrees ?? threeDdfa.ARotationAroundXDegrees)}/${formatNumber(threeDdfa.bRotationAroundYDegrees ?? threeDdfa.BRotationAroundYDegrees)}/${formatNumber(threeDdfa.cRotationAroundZDegrees ?? threeDdfa.CRotationAroundZDegrees)} | vertices ${formatInteger(threeDdfa.vertexCount ?? threeDdfa.VertexCount ?? threeDdfa.denseVertexCount ?? threeDdfa.DenseVertexCount)} | edges ${formatInteger(threeDdfa.edgeCount ?? threeDdfa.EdgeCount)} | confidence ${formatNumber(threeDdfa.reconstructionConfidencePercent ?? threeDdfa.ReconstructionConfidencePercent)}%`;
+  }
+
+  function formatThreeDdfaDetails(sample) {
+    const threeDdfa = getThreeDdfa(sample);
+    if (!threeDdfa) {
+      return '<span class="muted">Waiting for the 3DDFA async lane to attach a full-resolution reconstruction to this sample.</span>';
+    }
+
+    const warnings = threeDdfa.warnings || threeDdfa.Warnings || [];
+    const capturedAt = threeDdfa.capturedAtUtc || threeDdfa.CapturedAtUtc;
+    const stride = threeDdfa.denseSampleStride ?? threeDdfa.DenseSampleStride;
+    const source = threeDdfa.source || threeDdfa.Source || '3DDFA_V2 ONNX';
+    const poseSource = threeDdfa.poseSource || threeDdfa.PoseSource || '3DDFA pose solver';
+    const warningText = warnings.length > 0
+      ? `<span class="muted">warnings: ${warnings.map(escapeHtml).join('; ')}</span>`
+      : '<span class="muted">no 3DDFA warnings</span>';
+    return `${escapeHtml(source)} captured ${formatTime(capturedAt)}; vertices ${formatInteger(threeDdfa.vertexCount ?? threeDdfa.VertexCount ?? threeDdfa.denseVertexCount ?? threeDdfa.DenseVertexCount)}, topology edges ${formatInteger(threeDdfa.edgeCount ?? threeDdfa.EdgeCount)}, stride ${formatInteger(stride)}; A/B/C ${formatNumber(threeDdfa.aRotationAroundXDegrees ?? threeDdfa.ARotationAroundXDegrees)}/${formatNumber(threeDdfa.bRotationAroundYDegrees ?? threeDdfa.BRotationAroundYDegrees)}/${formatNumber(threeDdfa.cRotationAroundZDegrees ?? threeDdfa.CRotationAroundZDegrees)} from ${escapeHtml(poseSource)}; confidence ${formatNumber(threeDdfa.reconstructionConfidencePercent ?? threeDdfa.ReconstructionConfidencePercent)}%. ${warningText}`;
   }
 
   function formatApparentZ(sample) {
@@ -792,6 +1011,11 @@ tr[data-active="true"] { background: #102033; }
 
         return string.Concat(stability.Features.Select(feature =>
             $"<tr><td>{H(feature.Label)}</td><td>{H(feature.Status)}</td><td>{feature.SampleCount.ToString(CultureInfo.InvariantCulture)}</td><td>{feature.MaximumDriftPercent.ToString("0.#", CultureInfo.InvariantCulture)}%</td><td>{feature.AverageDriftPercent.ToString("0.#", CultureInfo.InvariantCulture)}%</td></tr>"));
+    }
+
+    private static string FormatSamplePointCounts(LastGoodFeatureMeshSample sample)
+    {
+        return sample.PointCount.ToString("n0", CultureInfo.InvariantCulture);
     }
 
     private static string BuildYawFindings(LastGoodFeatureMeshStabilityReport stability)

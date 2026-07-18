@@ -1,0 +1,31 @@
+{
+  "backend": "3DDFA_V2 ONNX avatar reconstruction lane",
+  "backendId": "3ddfa-v2-onnx-reconstruction",
+  "primaryModelFile": "3DDFA_V2/TDDFA_ONNX.py",
+  "modelFiles": [
+    "3DDFA_V2/TDDFA_ONNX.py",
+    "3DDFA_V2/configs/mb1_120x120.yml",
+    "3DDFA_V2/configs/bfm_noneck_v3.pkl",
+    "3DDFA_V2/configs/param_mean_std_62d_120x120.pkl"
+  ],
+  "alternativeModelFileGroups": [
+    [
+      "3DDFA_V2/weights/mb1_120x120.onnx",
+      "3DDFA_V2/weights/mb1_120x120.pth"
+    ]
+  ],
+  "sourceRepository": "https://github.com/cleardusk/3DDFA_V2",
+  "runtime": "Python sidecar using the official 3DDFA_V2 TDDFA_ONNX adapter and ONNX Runtime",
+  "runtimeFiles": [],
+  "expectedOutputs": [
+    "dense_3d_face_vertices",
+    "head_pose_xyzabc",
+    "shape_coefficients",
+    "expression_coefficients",
+    "landmark_correspondence",
+    "quality_report"
+  ],
+  "status": "official_3ddfa_v2_repo_and_weights_required",
+  "inferenceImplementationStatus": "ready",
+  "notes": "Episode Monitor includes a real 3DDFA_V2 ONNX Python sidecar adapter. Run tools/SetupThreeDdfaOnnxSidecar.ps1, place the official mb1_120x120 checkpoint or converted ONNX weight under 3DDFA_V2/weights, and configure Python before the avatar reconstruction lane can run."
+}

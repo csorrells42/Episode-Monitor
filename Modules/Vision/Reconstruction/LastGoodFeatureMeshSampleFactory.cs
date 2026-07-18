@@ -85,10 +85,10 @@ public static class LastGoodFeatureMeshSampleFactory
         FaceLandmarkFrame frame,
         FaceLandmarkMetrics metrics,
         FaceLockStabilityAnalysis stability,
-        PersonalFaceCaptureQualityAssessment captureQuality,
+        AvatarCaptureQualityAssessment captureQuality,
         out LastGoodFeatureMeshSample sample,
         out string reason,
-        HeadPoseEstimate? headPose = null)
+        FaceFrameGeometry? faceGeometry = null)
     {
         sample = new LastGoodFeatureMeshSample();
         reason = "";
@@ -125,7 +125,7 @@ public static class LastGoodFeatureMeshSampleFactory
             return false;
         }
 
-        var storedHeadPose = CreateStoredHeadPose(frame, metrics, headPose);
+        var storedFaceGeometry = CreateStoredFaceGeometry(frame, metrics, faceGeometry);
         var points = frame.DenseMeshPoints
             .OrderBy(static point => point.Index)
             .Select(static point => new FaceMeshLandmarkPoint
@@ -160,24 +160,24 @@ public static class LastGoodFeatureMeshSampleFactory
             FaceContinuityPercent = Round(stability.FaceContinuityPercent),
             EyeReliabilityPercent = Round(stability.EyeReliabilityPercent),
             MouthReliabilityPercent = Round(stability.MouthReliabilityPercent),
-            HeadYawDegrees = Round(storedHeadPose.YawDegrees),
-            HeadPitchDegrees = Round(storedHeadPose.PitchDegrees),
-            HeadRollDegrees = Round(storedHeadPose.RollDegrees),
-            XHorizontalPercent = Round(storedHeadPose.XHorizontalPercent),
-            YVerticalPercent = Round(storedHeadPose.YVerticalPercent),
-            DistanceInches = RoundNullable(storedHeadPose.DistanceInches),
-            ApparentDistanceUnits = RoundNullable(storedHeadPose.ApparentDistanceUnits),
-            RelativeDistanceScale = RoundNullable(storedHeadPose.RelativeDistanceScale),
-            InterEyeFrameWidthPercent = RoundNullable(storedHeadPose.InterEyeFrameWidthPercent),
-            ZConfidencePercent = Round(storedHeadPose.ZConfidencePercent),
-            DistanceCalibrated = storedHeadPose.DistanceCalibrated,
-            ZUsesCameraFov = storedHeadPose.ZUsesCameraFov,
-            ZUsesLearnedReference = storedHeadPose.ZUsesLearnedReference,
-            ZEstimateKind = storedHeadPose.ZEstimateKind,
-            ZQualityLabel = storedHeadPose.ZQualityLabel,
-            RotationSource = storedHeadPose.RotationSource,
-            DistanceSource = storedHeadPose.DistanceSource,
-            ReferenceScaleSource = storedHeadPose.ReferenceScaleSource,
+            HeadYawDegrees = Round(storedFaceGeometry.YawDegrees),
+            HeadPitchDegrees = Round(storedFaceGeometry.PitchDegrees),
+            HeadRollDegrees = Round(storedFaceGeometry.RollDegrees),
+            XHorizontalPercent = Round(storedFaceGeometry.XHorizontalPercent),
+            YVerticalPercent = Round(storedFaceGeometry.YVerticalPercent),
+            DistanceInches = RoundNullable(storedFaceGeometry.DistanceInches),
+            ApparentDistanceUnits = RoundNullable(storedFaceGeometry.ApparentDistanceUnits),
+            RelativeDistanceScale = RoundNullable(storedFaceGeometry.RelativeDistanceScale),
+            InterEyeFrameWidthPercent = RoundNullable(storedFaceGeometry.InterEyeFrameWidthPercent),
+            ZConfidencePercent = Round(storedFaceGeometry.ZConfidencePercent),
+            DistanceCalibrated = storedFaceGeometry.DistanceCalibrated,
+            ZUsesCameraFov = storedFaceGeometry.ZUsesCameraFov,
+            ZUsesLearnedReference = storedFaceGeometry.ZUsesLearnedReference,
+            ZEstimateKind = storedFaceGeometry.ZEstimateKind,
+            ZQualityLabel = storedFaceGeometry.ZQualityLabel,
+            RotationSource = storedFaceGeometry.RotationSource,
+            DistanceSource = storedFaceGeometry.DistanceSource,
+            ReferenceScaleSource = storedFaceGeometry.ReferenceScaleSource,
             LeftBrowHeightRatio = RoundNullable(metrics.LeftBrowHeightRatio),
             RightBrowHeightRatio = RoundNullable(metrics.RightBrowHeightRatio),
             AverageBrowHeightRatio = RoundNullable(metrics.AverageBrowHeightRatio),
@@ -200,14 +200,14 @@ public static class LastGoodFeatureMeshSampleFactory
         return true;
     }
 
-    private static StoredHeadPose CreateStoredHeadPose(
+    private static StoredFaceGeometry CreateStoredFaceGeometry(
         FaceLandmarkFrame frame,
         FaceLandmarkMetrics metrics,
-        HeadPoseEstimate? headPose)
+        FaceFrameGeometry? faceGeometry)
     {
-        if (headPose is { HasFace: true } pose)
+        if (faceGeometry is { HasFace: true } pose)
         {
-            return new StoredHeadPose(
+            return new StoredFaceGeometry(
                 CleanPoseDegrees(pose.BRotationAroundYDegrees, metrics.HeadYawDegrees),
                 CleanPoseDegrees(pose.ARotationAroundXDegrees, metrics.HeadPitchDegrees),
                 CleanPoseDegrees(pose.CRotationAroundZDegrees, metrics.HeadRollDegrees),
@@ -223,12 +223,12 @@ public static class LastGoodFeatureMeshSampleFactory
                 pose.ZUsesLearnedReference,
                 pose.ZEstimateKind,
                 pose.ZQualityLabel,
-                string.IsNullOrWhiteSpace(pose.RotationSource) ? "pose estimator" : pose.RotationSource,
+                string.IsNullOrWhiteSpace(pose.RotationSource) ? "face-frame geometry" : pose.RotationSource,
                 pose.DistanceSource,
                 pose.ReferenceScaleSource);
         }
 
-        return new StoredHeadPose(
+        return new StoredFaceGeometry(
             CleanPoseDegrees(metrics.HeadYawDegrees, frame.HeadYawDegrees),
             CleanPoseDegrees(metrics.HeadPitchDegrees, frame.HeadPitchDegrees),
             CleanPoseDegrees(metrics.HeadRollDegrees, frame.HeadRollDegrees),
@@ -357,7 +357,7 @@ public static class LastGoodFeatureMeshSampleFactory
         return double.IsNaN(value) || double.IsInfinity(value) ? fallback : value;
     }
 
-    private sealed record StoredHeadPose(
+    private sealed record StoredFaceGeometry(
         double YawDegrees,
         double PitchDegrees,
         double RollDegrees,

@@ -235,7 +235,7 @@ public sealed class LandmarkEventAggregate
         FaceLandmarkTrendAnalysis? trendAnalysis,
         FaceLockStabilityAnalysis? stabilityAnalysis,
         string backendStatus,
-        PersonalFaceCaptureQualityAssessment? captureQuality)
+        AvatarCaptureQualityAssessment? captureQuality)
     {
         if (!string.IsNullOrWhiteSpace(backendStatus))
         {
@@ -343,7 +343,7 @@ public sealed class LandmarkEventAggregate
         }
     }
 
-    private void UpdateCaptureQuality(PersonalFaceCaptureQualityAssessment? captureQuality)
+    private void UpdateCaptureQuality(AvatarCaptureQualityAssessment? captureQuality)
     {
         if (captureQuality is null)
         {

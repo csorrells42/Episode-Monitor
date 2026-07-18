@@ -11,3 +11,4 @@ EpisodeMonitorSessions/
 output/
 **/output/
 tmp/
+dependencies/vision/3ddfa-onnx/3DDFA_V2/

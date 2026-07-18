@@ -12,10 +12,6 @@ public sealed class FaceReconstructionWorkItem
 
     public FaceReconstructionSubjectGate SubjectGate { get; set; } = new();
 
-    public string PersonalFaceModelPath { get; set; } = "";
-
-    public string MeasurementJournalFolder { get; set; } = "";
-
     public string OutputFolder { get; set; } = "";
 
     public List<FaceReconstructionSourceFrame> SourceFrames { get; set; } = [];
