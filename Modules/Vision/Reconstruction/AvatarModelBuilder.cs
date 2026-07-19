@@ -211,6 +211,11 @@ public static class AvatarModelBuilder
         };
     }
 
+    internal static IReadOnlyList<FaceMeshLandmarkPoint> NormalizeIdentityVerticesForAudit(AvatarModelObservation observation)
+    {
+        return NormalizeIdentityVertices(observation);
+    }
+
     private static IReadOnlyList<FaceMeshLandmarkPoint> NormalizeIdentityVertices(AvatarModelObservation observation)
     {
         var bounds = Bounds.From(observation.Vertices);

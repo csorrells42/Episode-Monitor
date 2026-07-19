@@ -59,6 +59,12 @@ public sealed class AvatarSystemDashboard
 
     public string AvatarModelHtmlPath { get; set; } = "";
 
+    public string AvatarModelAuditStatus { get; set; } = "waiting for the first model baseline";
+
+    public string AvatarModelAuditSummary { get; set; } = "";
+
+    public string AvatarModelAuditHtmlPath { get; set; } = "";
+
     public string StoragePolicy { get; set; } =
-        "Avatar capture stores bounded 3DDFA observation data, review JSON/HTML, and a derived identity/expression model. The retired measurement-learning backend is not updating avatar geometry.";
+        "Avatar capture stores bounded 3DDFA observation data, review JSON/HTML, a derived identity/expression model, and a 30-day rebuild audit. The retired measurement-learning backend is not updating avatar geometry.";
 }

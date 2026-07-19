@@ -3498,6 +3498,7 @@ public partial class MainWindow : Window
         var lastGoodFeatureMeshStore = new LastGoodFeatureMeshStore();
         var lastGoodThreeDdfaStore = new LastGoodThreeDdfaStore();
         var avatarModelObservationStore = new AvatarModelObservationStore();
+        var avatarModelHistoryStore = new AvatarModelHistoryStore();
         var avatarModelStore = new AvatarModelStore();
 
         var lastGoodFeatureMeshFiles = lastGoodFeatureMeshStore.Write(
@@ -3527,6 +3528,10 @@ public partial class MainWindow : Window
             snapshot.LastGoodFeatureMeshSamples,
             snapshot.LastGoodThreeDdfaSamples);
         var avatarModel = AvatarModelBuilder.Build(avatarModelObservations);
+        var avatarModelHistory = avatarModelHistoryStore.RecordAndWrite(
+            snapshot.Folder,
+            avatarModelObservations,
+            avatarModel);
         var avatarModelJsonPath = avatarModelStore.Write(snapshot.Folder, avatarModel);
 
         var dashboard = new AvatarSystemDashboard
@@ -3554,7 +3559,10 @@ public partial class MainWindow : Window
             AvatarModelConfidencePercent = avatarModel.Identity.ConfidencePercent,
             AvatarModelCoveragePercent = avatarModel.PoseCoverage.CoveragePercent,
             AvatarModelCoverageSummary = avatarModel.PoseCoverage.Summary,
-            AvatarModelHtmlPath = AvatarModelStore.GetHtmlPath(snapshot.Folder)
+            AvatarModelHtmlPath = AvatarModelStore.GetHtmlPath(snapshot.Folder),
+            AvatarModelAuditStatus = avatarModelHistory.Latest.Status,
+            AvatarModelAuditSummary = avatarModelHistory.Latest.Summary,
+            AvatarModelAuditHtmlPath = AvatarModelHistoryStore.GetHtmlPath(snapshot.Folder)
         };
 
         var dashboardJsonPath = avatarSystemDashboardStore.Write(snapshot.Folder, dashboard);

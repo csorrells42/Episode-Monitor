@@ -66,6 +66,7 @@ public sealed class AvatarSystemDashboardStore
         html.AppendLine(Metric("Model observations", dashboard.AvatarModelObservationCount.ToString(CultureInfo.InvariantCulture)));
         html.AppendLine(Metric("Model confidence", $"{dashboard.AvatarModelConfidencePercent:0.#}%"));
         html.AppendLine(Metric("Model coverage", $"{dashboard.AvatarModelCoveragePercent:0.#}%"));
+        html.AppendLine(Metric("Model audit", dashboard.AvatarModelAuditStatus));
         html.AppendLine(Metric("B head-turn lock", FormatAxis(stability.YawHealthPercent, stability.YawRangeDegrees, "deg")));
         html.AppendLine(Metric("A tilt lock", FormatAxis(stability.AHealthPercent, stability.ARangeDegrees, "deg")));
         html.AppendLine(Metric("C tilt lock", FormatAxis(stability.CHealthPercent, stability.CRangeDegrees, "deg")));
@@ -93,6 +94,11 @@ public sealed class AvatarSystemDashboardStore
             html.AppendLine($"<p><a href=\"{H(dashboard.AvatarModelHtmlPath)}\">Open Avatar Model Progress</a></p>");
         }
 
+        if (!string.IsNullOrWhiteSpace(dashboard.AvatarModelAuditHtmlPath))
+        {
+            html.AppendLine($"<p><a href=\"{H(dashboard.AvatarModelAuditHtmlPath)}\">Open Avatar Model Regression Audit</a></p>");
+        }
+
         if (!string.IsNullOrWhiteSpace(dashboard.LastGoodFeaturesHtmlPath))
         {
             html.AppendLine($"<p><a href=\"{H(dashboard.LastGoodFeaturesHtmlPath)}\">Open MediaPipe Last 5 Feature Locks</a></p>");
@@ -104,6 +110,7 @@ public sealed class AvatarSystemDashboardStore
         }
 
         html.AppendLine($"<p class=\"muted\">Avatar model: {H(dashboard.AvatarModelStatus)} {H(dashboard.AvatarModelCoverageSummary)}</p>");
+        html.AppendLine($"<p class=\"muted\">Model audit: {H(dashboard.AvatarModelAuditSummary)}</p>");
         html.AppendLine($"<p class=\"muted\">{H(dashboard.LastGoodFeatureStatus)}</p>");
         html.AppendLine("</section>");
 
